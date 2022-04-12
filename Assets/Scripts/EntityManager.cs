@@ -7,10 +7,6 @@ using UnityEngine.Jobs;
 using Unity.Collections;
 using TMPro;
 
-struct Entity
-{
-    int data;
-}
 
 [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
 struct EntityMovementJob : IJobParallelForTransform
@@ -22,7 +18,6 @@ struct EntityMovementJob : IJobParallelForTransform
     [ReadOnly] public int COLS;
     [ReadOnly] public float moveSpeed;
     [ReadOnly] public float deltaTime;
-    Entity entity;
 
 
     public void Execute(int index, TransformAccess transform)
@@ -81,7 +76,12 @@ struct EntityMovementJob : IJobParallelForTransform
         float moveY = moveIndex % ROWS;
 
         Vector3 moveVector = new Vector3(moveX - intX, 0.0f, moveY - intY);
-        float modifiedMoveSpeed = moveSpeed + Mathf.Abs(highestInfluence) * 5;
+        float modifiedMoveSpeed = 0;
+        if (moveSpeed > 0)
+        {
+            modifiedMoveSpeed = moveSpeed + Mathf.Abs(highestInfluence) * 5;
+        }
+
         //transform.position += moveVector * moveSpeed * deltaTime;
         transform.position += moveVector * modifiedMoveSpeed * deltaTime;
     }
@@ -111,7 +111,7 @@ public class EntityManager : MonoBehaviour
     [SerializeField] float entityMoveSpeed = 2.0f;
 
 
-    [SerializeField] float radius = 5.0f;
+    [SerializeField] float radius = 1.0f;
     float mouseScroll;
 
     [SerializeField] TMP_Text mousePointRadiusText;
@@ -153,6 +153,9 @@ public class EntityManager : MonoBehaviour
         entityTransformList = new List<Transform>();
         transformAccessArray = new TransformAccessArray();
         timer = new Timer();
+
+        mousePointRadiusText.text = "Mouse point radius: " + radius.ToString();
+        moveSpeedText.text = "Move speed: " + entityMoveSpeed;
     }
 
     // Update is called once per frame
@@ -163,9 +166,9 @@ public class EntityManager : MonoBehaviour
         {
             if (entityList.Count > 0)
             {
-                EntityMovement();
+                //EntityMovementMT();
                 
-                //EntityMovementST();
+                EntityMovement();
             }
         }
 
@@ -180,18 +183,22 @@ public class EntityManager : MonoBehaviour
         if(Input.GetKeyDown(KeyCode.UpArrow))
         {
             entityMoveSpeed += 1.0f;
+            moveSpeedText.text = "Move speed: " + entityMoveSpeed;
         }
 
         if (Input.GetKeyDown(KeyCode.DownArrow))
         {
             entityMoveSpeed = entityMoveSpeed - 1.0f >= 0 ? entityMoveSpeed - 1.0f : 0.0f;
+            moveSpeedText.text = "Move speed: " + entityMoveSpeed;
         }
-
-        moveSpeedText.text = "Move speed: " + entityMoveSpeed;
-        
 
 
         if (Input.GetMouseButtonDown(0))
+        {
+            SpawnEntitiesCircle(Mathf.RoundToInt(radius));
+        }
+
+        if (Input.GetMouseButton(0) && Input.GetKey(KeyCode.LeftControl))
         {
             SpawnEntitiesCircle(Mathf.RoundToInt(radius));
         }
@@ -210,9 +217,11 @@ public class EntityManager : MonoBehaviour
 
     }
 
-    void EntityMovementST()
+    void EntityMovement()
     {
-        timer.RestartTimer();
+        timer.Restart();
+
+        // K‰yd‰‰n l‰pi kaikkien olioiden Transform-komponentit.
         for (int i = 0; i < entityTransformList.Count; i++)
         {
             Transform t = entityTransformList[i];
@@ -220,21 +229,26 @@ public class EntityManager : MonoBehaviour
             float x = t.position.x;
             float y = t.position.z;
 
-
+            // Pyˆristet‰‰n koordinaatit kokonaisluvuiksi vaikutuskartan indeksointia varten.
             int intX = Mathf.RoundToInt(x);
             int intY = Mathf.RoundToInt(y);
 
+            // Haetaan olion puoli.
             bool side = entitySidesList[i];
 
-            int moveIndex = intX * ROWS + intY; // Default move is the current position
+            int moveIndex = intX * ROWS + intY; // Vakiona liikutaan nykyiseen ruutuun.
 
+            // Asetetaan korkein vaikutus nykyisen ruudun mukaan.
             float highestInfluence = influenceMap[moveIndex];
 
+            // K‰yd‰‰n l‰pi kaikki ruudut v‰littˆm‰ss‰ l‰heisyydess‰
+            // ja valitaan ruutu jolla on korkein vaikutus olion puolta kohtaan.
             for (int j = 0; j < offsets.Length; j += 2)
             {
                 int xPos = intX + offsets[j];
                 int yPos = intY + offsets[j + 1];
 
+                // Tarkistetaan ett‰ koordinaatit ovat kartan sis‰ll‰.
                 if (xPos < 0 || xPos >= COLS
                     || yPos < 0 || yPos >= ROWS)
                 {
@@ -242,47 +256,57 @@ public class EntityManager : MonoBehaviour
                 }
                 else
                 {
+                    // Lasketaan koordinaatteja vastaava taulukon indeksi
+                    // ja haetaan sit‰ vastaava vaikutusarvo vaikutuskartasta.
                     int mapIndex = xPos * ROWS + yPos;
 
-                    if (mapIndex >= 0 && mapIndex < influenceMap.Length)
+                    float influence = influenceMap[mapIndex];
+
+                    // P‰ivitet‰‰n korkein vaikutusarvo ja liikkumis indeksi puolen mukaan.
+                    if (side)
                     {
-                        float influence = influenceMap[mapIndex];
-                        if (side)
+                        if (influence > highestInfluence)
                         {
-                            if (influence > highestInfluence)
-                            {
-                                highestInfluence = influence;
-                                moveIndex = mapIndex;
-                            }
-                        }
-                        else
-                        {
-                            if (influence < highestInfluence)
-                            {
-                                highestInfluence = influence;
-                                moveIndex = mapIndex;
-                            }
+                            highestInfluence = influence;
+                            moveIndex = mapIndex;
                         }
                     }
+                    else
+                    {
+                        if (influence < highestInfluence)
+                        {
+                            highestInfluence = influence;
+                            moveIndex = mapIndex;
+                        }
+                    }
+
                 }
             }
 
+            // Muunnetaan yksiulotteinen taulukon indeksi x- ja y-koordinaateiksi.
             float moveX = moveIndex / ROWS;
             float moveY = moveIndex % ROWS;
 
+            // Lasketaan liikkumis suunta nykyisest‰ ruudusta.
             Vector3 moveVector = new Vector3(moveX - intX, 0.0f, moveY - intY);
-            float modifiedMoveSpeed = entityMoveSpeed + Mathf.Abs(highestInfluence) * 5;
 
-            //t.position += moveVector * entityMoveSpeed * Time.deltaTime;
+            float modifiedMoveSpeed = 0;
+            if (entityMoveSpeed > 0)
+            {
+                // Muunnetaan liikkumisnopeutta korkeimman vaikutuksen mukaan.
+                modifiedMoveSpeed = entityMoveSpeed + Mathf.Abs(highestInfluence) * 5;
+            }
+
+            // P‰ivitet‰‰n Transform-komponentin sijaintia liikkumissuunnan ja nopeuden mukaan.
             t.position += moveVector * modifiedMoveSpeed * Time.deltaTime;
         }
-        timer.StopTimer();
+        timer.Stop();
         movementUpdateTimeText.text = "Movement update time: " + timer.GetTimeStr();
     }
 
-    public void EntityMovement()
+    public void EntityMovementMT()
     {
-        timer.RestartTimer();
+        timer.Restart();
         entityMovementJob = new EntityMovementJob();
 
         if(entitiesChanged)
@@ -316,7 +340,7 @@ public class EntityManager : MonoBehaviour
         movementJobHandle = entityMovementJob.Schedule(transformAccessArray);
         JobHandle.ScheduleBatchedJobs();
 
-        timer.StopTimer();
+        timer.Stop();
         movementUpdateTimeText.text = "Movement update time: " + timer.GetTimeStr();
 
     }
@@ -331,9 +355,6 @@ public class EntityManager : MonoBehaviour
     {
         GameObject newEntity = Instantiate(entityPrefab);
         entityList.Add(newEntity);
-        //EntityScript entityScript = newEntity.GetComponent<EntityScript>();
-        //entityScript.Setup();
-        //entityList.Add(new Entity());
         bool side = Random.value > 0.5f;
 
         if(side)
@@ -391,12 +412,26 @@ public class EntityManager : MonoBehaviour
     {
         // Check if map changed?
 
-        if (influenceMap.IsCreated)
+        if(InfluenceMap.Instance.useNativeMap)
         {
-            influenceMap.Dispose();
+            if (influenceMap.IsCreated)
+            {
+                influenceMap.Dispose();
+            }
+
+            influenceMap = new NativeArray<float>(InfluenceMap.Instance.influenceMapNativePrev, Allocator.Persistent);
+        }
+        else
+        {
+            if (influenceMap.IsCreated)
+            {
+                influenceMap.Dispose();
+            }
+
+            influenceMap = new NativeArray<float>(InfluenceMap.Instance.influenceMapPrev, Allocator.Persistent);
         }
 
-        influenceMap = new NativeArray<float>(InfluenceMap.Instance.influenceMapNativePrev, Allocator.Persistent);
+        
         //InfluenceMap.Instance.influenceMapNativePrev.CopyTo(influenceMap);
     }
 

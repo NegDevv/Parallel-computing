@@ -7,6 +7,8 @@ using Unity.Jobs;
 using Unity.Collections;
 using Unity.Burst;
 using Unity.Burst.Intrinsics;
+using float4 = Unity.Mathematics.float4;
+using static Unity.Mathematics.math;
 using Unity.Collections.LowLevel.Unsafe;
 using TMPro;
 
@@ -49,24 +51,24 @@ public class Timer
         return elapsedMs + "ms";
     }
 
-    public void StartTimer()
+    public void Start()
     {
         // Tick is 100ns
         stopwatch.Start();
     }
 
-    public void RestartTimer()
+    public void Restart()
     {
         stopwatch.Restart();
     }
 
-    public void StopTimer()
+    public void Stop()
     {
         // Tick is 100ns
         stopwatch.Stop();
     }
 
-    public void ResetTimer()
+    public void Reset()
     {
         // Tick is 100ns
         stopwatch.Reset();
@@ -88,7 +90,7 @@ public class Timer
 
 }
 
-struct Unit
+public struct Unit
 {
     public int x;
     public int y;
@@ -99,161 +101,116 @@ public class InfluenceMap : MonoBehaviour
 {
     public static InfluenceMap Instance;
 
-    [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
-    struct InfluenceMapJob : IJobParallelFor
-    {
-        [ReadOnly] public NativeArray<float> unitMap;
-        public NativeArray<float> influenceMap;
+    const int deterministicSeed = 118355416;
 
-        [ReadOnly] public NativeArray<int> unitXCords;
-        [ReadOnly] public NativeArray<int> unitYCords;
-        [ReadOnly] public NativeArray<float> unitInfs;
+    [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
+    struct InfluenceMapJobUnitStruct : IJobParallelFor
+    {
+        public NativeArray<float> influenceMap;
 
         [ReadOnly] public NativeArray<Unit> units;
 
-
-        const int _CMP_NEQ_OQ = 0x0C;
-
-        //Calculates Euclidean distance between points
-        float Distance(int col0, int row0, int col1, int row1)
-        {
-            return Mathf.Sqrt((col1 - col0) * (col1 - col0) + (row1 - row0) * (row1 - row0));
-        }
-
-        // SOME INTRINSICS REQUIRE TO ENABLED IN PROJECT SETTINGS 
-        float horizontal_sumf(v256 x)
-        {
-            v128 hi = mm256_extractf128_ps(x, 1);
-            v128 lo = mm256_extractf128_ps(x, 0);
-            lo = add_ps(hi, lo);
-            hi = movehl_ps(hi, lo);
-            lo = add_ps(hi, lo);
-            hi = shuffle_ps(lo, lo, 1);
-            lo = add_ss(hi, lo);
-            return cvtss_f32(lo);
-        }
-
-        v256 CalcDistVector8f_v256(v256 c0, v256 r0, v256 c1, v256 r1)
-        {
-            if (IsFmaSupported)
-            {
-                v256 colSubVector = mm256_sub_ps(c1, c0);
-
-                v256 rowSubVector = mm256_sub_ps(r1, r0);
-
-                v256 rowMulVector = mm256_mul_ps(rowSubVector, rowSubVector);
-
-                v256 sumVector = mm256_fmadd_ps(colSubVector, colSubVector, rowMulVector);
-
-                v256 sqrtVector = mm256_sqrt_ps(sumVector);
-
-                return sqrtVector;
-            }
-            else
-            {
-                v256 colSubVector = mm256_sub_ps(c1, c0);
-
-                v256 rowSubVector = mm256_sub_ps(r1, r0);
-
-                v256 colMulVector = mm256_mul_ps(colSubVector, colSubVector);
-                v256 rowMulVector = mm256_mul_ps(rowSubVector, rowSubVector);
-
-                v256 sumVector = mm256_add_ps(colMulVector, rowMulVector);
-
-
-                v256 rsqrtVector = mm256_rsqrt_ps(sumVector);
-                v256 sqrtVector = mm256_rcp_ps(rsqrtVector); // minimal loss of accuracy (max relative error: 1.5*2^-12)
-
-                return sqrtVector;
-            }
-        }
-
-        //Requires allow unsafe code in player settings
-        unsafe float CalcPointInfAVX(int col, int row)
-        {
-            float inf = 0;
-            const int end = ROWS - 8;
-            const int rest = ROWS % 8;
-
-            v256 iVec = mm256_set_ps(0, 1, 2, 3, 4, 5, 6, 7);
-            v256 resVector = mm256_set1_ps(0);
-            v256 addVector = mm256_set1_ps(1.0f);
-            v256 col0Vector = mm256_set1_ps(col);
-            v256 row0Vector = mm256_set1_ps(row);
-
-            for (int x = 0; x < COLS; x++)
-            {
-                v256 col1Vector = mm256_set1_ps(x);
-
-                for (int y = 0; y < end; y += 8)
-                {
-                    v256 row1Vector = mm256_add_ps(iVec, mm256_set1_ps(y));
-
-                    v256 distsVec = CalcDistVector8f_v256(col0Vector, row0Vector, col1Vector, row1Vector);
-
-                    // Add 1 to dists per the formula inf = infl / (1 + dist);
-                    distsVec = mm256_add_ps(distsVec, addVector); // add 1 to all values
-
-                    int index = x * ROWS + y;
-                    //v256 infsVec = mm256_set_ps((float)unitMap[index + 0], (float)unitMap[index + 1], (float)unitMap[index + 2], (float)unitMap[index + 3], (float)unitMap[index + 4], (float)unitMap[index + 5], (float)unitMap[index + 6], (float)unitMap[index + 7]);
-
-                    //v256 infsVec = mm256_loadu_ps(&unitMap.ReinterpretLoad(index));
-                    //UnsafeUtility.AddressOf<float>(unitMap.GetUnsafePtr(), index);
-                    //void* ptr = NativeArrayUnsafeUtility.GetUnsafePtr((float*)&unitMap[index]);
-
-                    // Causes burst error in editor because of [ReadOnly], but is faster
-                    var ptr = (float*)NativeArrayUnsafeUtility.GetUnsafePtr(unitMap);
-                    var offset = ptr + index;
-                    v256 infsVec = mm256_loadu_ps(offset);
-
-                    // Check for non zero vectors
-                    v256 vcmp = mm256_cmp_ps(infsVec, mm256_set1_ps(0.0f), _CMP_NEQ_OQ); // Element in vcmp is set to all 0's if corresponding element in infsVec is 0, else corresponding element in vcmp is set to all 1's
-                    int mask = mm256_movemask_ps(vcmp); // First 8 bits of mask correspond to the sign bits of elements in vcmp 
-                    bool anyNonZero = mask != 0; // True if any of masks first 8 bits is 1(at least 1 non zero element)
-
-
-                    //resVector = _mm256_add_ps(resVector, _mm256_div_ps(infsVec, distsVec));
-                    if (anyNonZero)
-                    {
-                        resVector = mm256_add_ps(resVector, mm256_mul_ps(infsVec, mm256_rcp_ps(distsVec)));
-                    }
-                }
-
-                // Calculate the rest normally. For example(300 % 8) = 4 (~10% of the total) (Worst case COLS % 8 == 7 which makes this scalar loop almost 20% of the total = BAD)
-                for (int y = 0; y < rest; y++) // Try to get rid of this somehow(Find a general solution)
-                {
-                    float dist = Distance(col, row, x, end + y);
-                    int index = x * ROWS + y;
-                    inf += unitMap[index] / (1.0f + dist);
-                }
-            }
-
-            inf += horizontal_sumf(resVector);
-            return inf;
-        }
-
-        float CalcPointInf(int col, int row)
+        float CalculatePointInfluenceUnitStructFloat4(int col, int row)
         {
             float totalInf = 0.0f;
-            for (int i = 0; i < unitInfs.Length; i++)
+            int unitCount = units.Length;
+
+            int end = unitCount - 4;
+            int rest = unitCount % 4;
+
+            float4 resVector = new float4(0.0f); // Result accumulator
+            float4 addVector = new float4(1.0f); // Distance dropoff factor(smaller is faster dropoff)
+            float4 col0Vector = new float4(col);
+            float4 row0Vector = new float4(row);
+
+
+            for (int i = 0; i < end; i += 4)
             {
-                Unity.Burst.CompilerServices.Loop.ExpectVectorized();
-                int x = unitXCords[i];
-                int y = unitYCords[i];
+                float4 xVector = new float4(units[i + 0].x, units[i + 1].x, units[i + 2].x, units[i + 3].x);
 
-                float dist = Distance(col, row, x, y);
+                float4 yVector = new float4(units[i + 0].y, units[i + 1].y, units[i + 2].y, units[i + 3].y);
 
-                totalInf += unitInfs[i] / (1 + dist);
+                float4 distVector = CalcDistFloat4(col0Vector, row0Vector, xVector, yVector);
+
+                distVector = distVector + addVector;
+
+                float4 infVector = new float4(units[i + 0].influence, units[i + 1].influence, units[i + 2].influence, units[i + 3].influence);
+
+                //resVector = resVector + (infVector / distVector);
+                resVector = resVector + (infVector * rcp(distVector));
             }
+
+            // Add horizontal sum of resVector to totalInf
+            totalInf += csum(resVector);
+
+            // Calculate the rest normally. 
+            for (int i = 0; i < rest; i++)
+            {
+                int x = units[i].x;
+                int y = units[i].y;
+                float dist = Distance(col, row, x, y);
+                totalInf += units[i].influence / (1.0f + dist);
+            }
+
             return totalInf;
         }
 
-        float CalcPointInfStruct(int col, int row)
+        unsafe float CalcPointInfUnitStructAVX(int col, int row)
+        {
+            float totalInf = 0.0f;
+            int unitCount = units.Length;
+
+            int end = unitCount - 8;
+            int rest = unitCount % 8;
+
+            v256 resVector = mm256_set1_ps(0); // Result accumulator
+            v256 addVector = mm256_set1_ps(1.0f); // Distance dropoff factor(smaller is faster dropoff)
+            v256 col0Vector = mm256_set1_ps(col);
+            v256 row0Vector = mm256_set1_ps(row);
+
+
+            for (int i = 0; i < end; i += 8)
+            {
+
+                v256 xVector = mm256_set_ps(units[i + 0].x, units[i + 1].x, units[i + 2].x, units[i + 3].x,
+                    units[i + 4].x, units[i + 5].x, units[i + 6].x, units[i + 07].x);
+
+
+                v256 yVector = mm256_set_ps(units[i + 0].y, units[i + 1].y, units[i + 2].y, units[i + 3].y,
+                    units[i + 4].y, units[i + 5].y, units[i + 6].y, units[i + 7].y);
+
+                v256 distVector = CalcDistVector8f_v256(col0Vector, row0Vector, xVector, yVector);
+
+                distVector = mm256_add_ps(distVector, addVector);
+
+
+                v256 infVector = mm256_set_ps(units[i + 0].influence, units[i + 1].influence, units[i + 2].influence, units[i + 3].influence,
+                    units[i + 4].influence, units[i + 5].influence, units[i + 6].influence, units[i + 7].influence);
+
+                //resVector = mm256_add_ps(resVector, mm256_div_ps(infVector, distVector));
+                resVector = mm256_add_ps(resVector, mm256_mul_ps(infVector, mm256_rcp_ps(distVector)));
+            }
+
+            totalInf += horizontal_sumf(resVector);
+
+            // Calculate the rest normally. For example(300 % 8) = 4 (~10% of the total) (Worst case COLS % 8 == 7 which makes this scalar loop almost 20% of the total = BAD)
+            for (int i = 0; i < rest; i++) // Try to get rid of this somehow(Find a general solution)
+            {
+                int x = units[i].x;
+                int y = units[i].y;
+                float dist = Distance(col, row, x, y);
+                totalInf += units[i].influence / (1.0f + dist);
+            }
+
+            return totalInf;
+        }
+
+        float CalcPointInfUnitStruct(int col, int row)
         {
             float totalInf = 0.0f;
             for (int i = 0; i < units.Length; i++)
             {
-                Unity.Burst.CompilerServices.Loop.ExpectVectorized();
+                //Unity.Burst.CompilerServices.Loop.ExpectVectorized();
                 int x = units[i].x;
                 int y = units[i].y;
 
@@ -264,63 +221,124 @@ public class InfluenceMap : MonoBehaviour
             return totalInf;
         }
 
-        unsafe float CalcPointInfAVX_2(int col, int row)
+        public void Execute(int index)
+        {
+            if (IsAvxSupported)
+            {
+                int x = index / ROWS;
+                int y = index % ROWS;
+
+                float influencePoint = CalcPointInfUnitStructAVX(x, y);
+                //float influencePoint = CalculatePointInfluenceUnitStructFloat4(x, y);
+                influenceMap[index] = influencePoint;
+            }
+            else
+            {
+                int x = index / ROWS;
+                int y = index % ROWS;
+
+                float influencePoint = CalcPointInfUnitStruct(x, y);
+                influenceMap[index] = influencePoint;
+            }
+        }
+    }
+
+    [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
+    struct InfluenceMapJob : IJobParallelFor
+    {
+        public NativeArray<float> influenceMap;
+
+        [ReadOnly] public NativeArray<int> unitXCords;
+        [ReadOnly] public NativeArray<int> unitYCords;
+        [ReadOnly] public NativeArray<float> unitInfs;
+
+
+        float CalculatePointInfluenceFloat4(int col, int row)
         {
             float totalInf = 0.0f;
             int unitCount = unitInfs.Length;
+
+            int end = unitCount - 4;
+            int rest = unitCount % 4;
+
+            float4 resVector = new float4(0.0f); // Result accumulator
+            float4 addVector = new float4(1.0f); // Distance dropoff factor(smaller is faster dropoff)
+            float4 col0Vector = new float4(col);
+            float4 row0Vector = new float4(row);
+
+
+            for (int i = 0; i < end; i += 4)
+            {
+                float4 xVector = new float4(unitXCords[i + 0], unitXCords[i + 1], unitXCords[i + 2], unitXCords[i + 3]);
+
+                float4 yVector = new float4(unitYCords[i + 0], unitYCords[i + 1], unitYCords[i + 2], unitYCords[i + 3]);
+
+                float4 distVector = CalcDistFloat4(col0Vector, row0Vector, xVector, yVector);
+
+                distVector = distVector + addVector;
+
+                float4 infVector = new float4(unitInfs[i + 0], unitInfs[i + 1], unitInfs[i + 2], unitInfs[i + 3]);
+
+                //resVector = resVector + (infVector / distVector);
+                resVector = resVector + (infVector * rcp(distVector));
+            }
+
+            // Add horizontal sum of resVector to totalInf
+            totalInf += csum(resVector);
+
+            // Calculate the rest normally. 
+            for (int i = 0; i < rest; i++)
+            {
+                int x = unitXCords[i];
+                int y = unitYCords[i];
+                float dist = Distance(col, row, x, y);
+                totalInf += unitInfs[i] / (1.0f + dist);
+            }
+
+            return totalInf;
+        }
+
+
+        // Requires allow unsafe code in player settings
+        unsafe float CalcPointInfUnsafeAVX(int col, int row)
+        {
+            float totalInf = 0.0f;
+            int unitCount = unitInfs.Length;
+
             int end = unitCount - 8;
             int rest = unitCount % 8;
 
-            //v256 iVector = mm256_set_ps(0, 1, 2, 3, 4, 5, 6, 7);
-            v256 resVector = mm256_set1_ps(0);
+            v256 resVector = mm256_set1_ps(0); // Result accumulator
             v256 addVector = mm256_set1_ps(1.0f); // Distance dropoff factor(smaller is faster dropoff)
             v256 col0Vector = mm256_set1_ps(col);
             v256 row0Vector = mm256_set1_ps(row);
 
-            //int* xCordsPtr = (int*)NativeArrayUnsafeUtility.GetUnsafePtr(unitXCords);
-            //int* yCordsPtr = (int*)NativeArrayUnsafeUtility.GetUnsafePtr(unitYCords);
-            //int* infsPtr = (int*)NativeArrayUnsafeUtility.GetUnsafePtr(unitInfs);
+            int* xCordsPtr = (int*)NativeArrayUnsafeUtility.GetUnsafePtr(unitXCords);
+            int* yCordsPtr = (int*)NativeArrayUnsafeUtility.GetUnsafePtr(unitYCords);
+            float* infsPtr = (float*)NativeArrayUnsafeUtility.GetUnsafePtr(unitInfs);
 
             for (int i = 0; i < end; i += 8)
             {
-                //int* xCordsPtr = (int*)NativeArrayUnsafeUtility.GetUnsafePtr(unitXCords);
-                //int* xCordsOffset = xCordsPtr + i;
-                ////v256 xVector = mm256_lddqu_si256(xCordsOffset);
-                ////v256 xVector = mm256_loadu_si256(xCordsOffset);
-                //v256 xVector = mm256_cvtepi32_ps(mm256_loadu_si256(xCordsOffset));
+                int* xCordsOffset = xCordsPtr + i;
+                //v256 xVector = mm256_lddqu_si256(xCordsOffset);
+                //v256 xVector = mm256_loadu_si256(xCordsOffset);
+                v256 xVector = mm256_cvtepi32_ps(mm256_loadu_si256(xCordsOffset));
 
-                v256 xVector = mm256_set_ps(unitXCords[i + 0], unitXCords[i + 1], unitXCords[i + 2], unitXCords[i + 3],
-                    unitXCords[i + 4], unitXCords[i + 5], unitXCords[i + 6], unitXCords[i + 7]);
+                int* yCordsOffset = yCordsPtr + i;
+                //v256 yVector = mm256_lddqu_si256(yCordsOffset);
+                //v256 yVector = mm256_loadu_si256(yCordsOffset);
+                v256 yVector = mm256_cvtepi32_ps(mm256_loadu_si256(yCordsOffset));
 
-                //int* yCordsPtr = (int*)NativeArrayUnsafeUtility.GetUnsafePtr(unitYCords);
-                //int* yCordsOffset = yCordsPtr + i;
-                ////v256 yVector = mm256_lddqu_si256(yCordsOffset);
-                ////v256 yVector = mm256_loadu_si256(yCordsOffset);
-                //v256 yVector = mm256_cvtepi32_ps(mm256_loadu_si256(yCordsOffset));
-
-                v256 yVector = mm256_set_ps(unitYCords[i + 0], unitYCords[i + 1], unitYCords[i + 2], unitYCords[i + 3],
-                    unitYCords[i + 4], unitYCords[i + 5], unitYCords[i + 6], unitYCords[i + 7]);
 
                 v256 distVector = CalcDistVector8f_v256(col0Vector, row0Vector, xVector, yVector);
 
                 distVector = mm256_add_ps(distVector, addVector);
 
-                //float* infsPtr = (float*)NativeArrayUnsafeUtility.GetUnsafePtr(unitInfs);
-                //float* infsOffset = infsPtr + i;
-                //v256 infVector = mm256_loadu_ps(infsOffset);
+                float* infsOffset = infsPtr + i;
+                v256 infVector = mm256_loadu_ps(infsOffset);
 
-                v256 infVector = mm256_set_ps(unitInfs[i + 0], unitInfs[i + 1], unitInfs[i + 2], unitInfs[i + 3],
-                    unitInfs[i + 4], unitInfs[i + 5], unitInfs[i + 6], unitInfs[i + 7]);
-
-                v256 vcmp = mm256_cmp_ps(infVector, mm256_set1_ps(0.0f), _CMP_NEQ_OQ); // Element in vcmp is set to all 0's if corresponding element in infsVec is 0, else corresponding element in vcmp is set to all 1's
-                int mask = mm256_movemask_ps(vcmp); // First 8 bits of mask correspond to the sign bits of elements in vcmp 
-                bool anyNonZero = mask != 0; // True if any of masks first 8 bits is 1(at least 1 non zero element)
-
-                //resVector = _mm256_add_ps(resVector, _mm256_div_ps(infsVec, distsVec));
-                if (anyNonZero)
-                {
-                    resVector = mm256_add_ps(resVector, mm256_mul_ps(infVector, mm256_rcp_ps(distVector)));
-                }
+                //resVector = mm256_add_ps(resVector, mm256_div_ps(infVector, distVector));
+                resVector = mm256_add_ps(resVector, mm256_mul_ps(infVector, mm256_rcp_ps(distVector)));
             }
 
             totalInf += horizontal_sumf(resVector);
@@ -337,81 +355,94 @@ public class InfluenceMap : MonoBehaviour
             return totalInf;
         }
 
+        float CalcPointInfAVX(int col, int row)
+        {
+            float totalInf = 0.0f;
+            int unitCount = unitInfs.Length;
 
-        
+            int end = unitCount - 8;
+            int rest = unitCount % 8;
+
+            v256 resVector = mm256_set1_ps(0); // Result accumulator
+            v256 addVector = mm256_set1_ps(1.0f); // Distance dropoff factor(smaller is faster dropoff)
+            v256 col0Vector = mm256_set1_ps(col);
+            v256 row0Vector = mm256_set1_ps(row);
+
+            for (int i = 0; i < end; i += 8)
+            {
+                v256 xVector = mm256_set_ps(unitXCords[i + 0], unitXCords[i + 1], unitXCords[i + 2], unitXCords[i + 3],
+                    unitXCords[i + 4], unitXCords[i + 5], unitXCords[i + 6], unitXCords[i + 7]);
+
+                v256 yVector = mm256_set_ps(unitYCords[i + 0], unitYCords[i + 1], unitYCords[i + 2], unitYCords[i + 3],
+                    unitYCords[i + 4], unitYCords[i + 5], unitYCords[i + 6], unitYCords[i + 7]);
+
+                v256 distVector = CalcDistVector8f_v256(col0Vector, row0Vector, xVector, yVector);
+
+                distVector = mm256_add_ps(distVector, addVector);
+
+                v256 infVector = mm256_set_ps(unitInfs[i + 0], unitInfs[i + 1], unitInfs[i + 2], unitInfs[i + 3],
+                    unitInfs[i + 4], unitInfs[i + 5], unitInfs[i + 6], unitInfs[i + 7]);
+
+                //resVector = mm256_add_ps(resVector, mm256_div_ps(infVector, distVector));
+                resVector = mm256_add_ps(resVector, mm256_mul_ps(infVector, mm256_rcp_ps(distVector)));
+            }
+
+            totalInf += horizontal_sumf(resVector);
+
+            // Calculate the rest normally. For example(300 % 8) = 4 (~10% of the total) (Worst case COLS % 8 == 7 which makes this scalar loop almost 20% of the total = BAD)
+            for (int i = 0; i < rest; i++) // Try to get rid of this somehow(Find a general solution)
+            {
+                int x = unitXCords[i];
+                int y = unitYCords[i];
+                float dist = Distance(col, row, x, y);
+                totalInf += unitInfs[i] / (1.0f + dist);
+            }
+
+            return totalInf;
+        }
 
         // Calculates and returns influence for a single point in the influence map
         float CalculatePointInfluence(int col, int row)
         {
             float totalInfluence = 0.0f;
-            for (int x = 0; x < COLS; x++)
+            for (int i = 0; i < unitInfs.Length; i++)
             {
-                for (int y = 0; y < ROWS; y++)
-                {
-                    float distance = Distance(col, row, x, y);
-                    int index = x * ROWS + y;
-                    totalInfluence += unitMap[index] / (1 + distance); // Influence of units on a point drops with relative to distance
-                }
-            }
+                int x = unitXCords[i];
+                int y = unitYCords[i];
 
+                float dist = Distance(col, row, x, y);
+
+                totalInfluence += unitInfs[i] / (1 + dist);
+            }
             return totalInfluence;
         }
 
         public void Execute(int index)
         {
-            //if (IsAvxSupported)
-            //{
-            //    int x = index / ROWS;
-            //    int y = index % ROWS;
+            if (IsAvxSupported)
+            {
+                int x = index / ROWS;
+                int y = index % ROWS;
 
-            //    influenceMap[index] = CalcPointInfAVX(x, y);
-            //}
-            //else
-            //{
-            //    int x = index / ROWS;
-            //    int y = index % ROWS;
+                float influencePoint = CalcPointInfAVX(x, y);
+                //float influencePoint = CalcPointInfUnsafeAVX(x, y);
+                //float influencePoint = CalculatePointInfluenceFloat4(x, y);
+                influenceMap[index] = influencePoint;
+            }
+            else
+            {
+                int x = index / ROWS;
+                int y = index % ROWS;
 
-            //    //float influencePoint = CalculatePointInfluence(x, y);
-            //    float influencePoint = CalcPointInf(x, y);
-            //    influenceMap[index] = influencePoint;
-            //}
-
-            int x = index / ROWS;
-            int y = index % ROWS;
-
-            //float influencePoint = CalculatePointInfluence(x, y);
-            //float influencePoint = CalcPointInf(x, y);
-            float influencePoint = CalcPointInfStruct(x, y);
-            //float influencePoint = CalcPointInfAVX_2(x, y);
-            influenceMap[index] = influencePoint;
-
-            //int x = index / ROWS;
-            //int y = index % ROWS;
-
-            //float influencePoint = CalculatePointInfluence(x, y);
-            //influenceMap[index] = influencePoint;
-
-
-            //float influencePoint = CalculatePointInfluence(x, y);
-
+                float influencePoint = CalculatePointInfluence(x, y);
+                influenceMap[index] = influencePoint;
+            }
         }
-
-        //public void Execute(int index)
-        //{
-        //    int x = index / ROWS;
-        //    int y = index % ROWS - 1;
-            
-        //    float influencePoint = CalculatePointInfluence(x, y);
-        //    influenceMap[index] = influencePoint;
-        //}
     }
-
 
     [SerializeField] GameObject influenceMapObj;
     [SerializeField] Renderer renderer;
     Texture2D influenceMapTexture;
-
-    [SerializeField] GameObject entity;
 
     const int ROWS = 320;
     const int COLS = 320;
@@ -425,14 +456,25 @@ public class InfluenceMap : MonoBehaviour
     int[,] offsets = new int[,] { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 1, -1 }, { 0, -1 }, { -1, -1 }, { -1, 0 }, { -1, 1 } };
     float entityMoveSpeed = 0.1f;
 
+    List<Unit> units;
 
-    float[,] unitsMap = new float[COLS, ROWS];
-    float[,] influenceMap = new float[COLS, ROWS];
-    float[,] influenceMapPrev = new float[COLS, ROWS];
+    int unitCount = 0;
+    [SerializeField] TMP_Text unitCountText;
 
-    public NativeArray<int> unitXCords;
-    public NativeArray<int> unitYCords;
-    public NativeArray<float> unitInfs;
+    public float[] influenceMap;
+    public float[] influenceMapPrev;
+
+
+    List<int> unitXCords;
+    List<int> unitYCords;
+    List<float> unitInfs;
+
+
+    public NativeArray<Unit> unitsNative;
+
+    public NativeArray<int> unitXCordsNative;
+    public NativeArray<int> unitYCordsNative;
+    public NativeArray<float> unitInfsNative;
 
 
     public NativeArray<float> unitMapNative;
@@ -453,21 +495,19 @@ public class InfluenceMap : MonoBehaviour
     JobHandle influenceMapJobHandle;
     InfluenceMapJob influenceMapJob;
 
+    JobHandle influenceMapJobUnitStructHandle;
+    InfluenceMapJobUnitStruct influenceMapJobUnitStruct;
+
     bool influenceJobReady = false;
 
     Timer jobTimer;
 
     [SerializeField] TMP_Text timerText;
+    [SerializeField] TMP_Text renderTimerText;
     [SerializeField] TMP_Text mapSizeText;
     [SerializeField] TMP_Text entityCountText;
 
-
-    [SerializeField] GameObject entityPrefab;
-
-    List<GameObject> entityList;
-
-    const int entityCount = 100;
-
+    public bool useNativeMap = false;
 
     private void Awake()
     {
@@ -483,57 +523,35 @@ public class InfluenceMap : MonoBehaviour
     // Start is called before the first frame update
     void Start()
     {
-        //influenceMapObj.transform.localScale = new Vector3(COLS, ROWS, ROWS);
+        units = new List<Unit>();
+
+        unitXCords = new List<int>();
+        unitYCords = new List<int>();
+        unitInfs = new List<float>();
+
+        influenceMap = new float[COLS * ROWS];
+
+        influenceMapPrev = new float[COLS * ROWS];
+
         unitMapNative = new NativeArray<float>(ROWS* COLS, Allocator.Persistent);
         influenceMapNative = new NativeArray<float>(ROWS* COLS, Allocator.Persistent);
-        influenceMapNativePrev = new NativeArray<float>(ROWS* COLS, Allocator.Persistent);
+        influenceMapNativePrev = new NativeArray<float>(ROWS * COLS, Allocator.Persistent);
 
         influenceMapTexture = new Texture2D(ROWS, COLS, TextureFormat.RGBA32, false);
         influenceMapTexture.filterMode = FilterMode.Point;
         textureID = Shader.PropertyToID("_MainTex");
         textureColorID = Shader.PropertyToID("_Color");
+        renderer.material.SetTexture(textureID, influenceMapTexture);
+        renderer.material.SetColor(textureColorID, Color.white);
 
-        GenerateRandomNativeMap(unitMapNative);
-
-        unitXCords = new NativeArray<int>(10, Allocator.Persistent);
-        unitYCords = new NativeArray<int>(10, Allocator.Persistent);
-        unitInfs = new NativeArray<float>(10, Allocator.Persistent);
-        GenerateRandomUnits();
-
-        //GenerateRandomNativeMapFull(unitMapNative);
+        unitXCordsNative = new NativeArray<int>(10, Allocator.Persistent);
+        unitYCordsNative = new NativeArray<int>(10, Allocator.Persistent);
+        unitInfsNative = new NativeArray<float>(10, Allocator.Persistent);
 
         mapSizeText.text = "Map size: " + COLS + " x " + ROWS;
         jobTimer = new Timer();
 
-        //for (int i = -3; i < 4; i++)
-        //{
-        //    for (int j = -3; j < 4; j++)
-        //    {
-        //        offsets[i, j] = i
-        //    }
-        //}
         offsets = new int[,] { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 1, -1 }, { 0, -1 }, { -1, -1 }, { -1, 0 }, { -1, 1 } };
-
-
-        entityList = new List<GameObject>();
-
-        //for (int i = 0; i < entityCount; i++)
-        //{
-        //    GameObject newEntity = Instantiate(entityPrefab);
-        //    entityList.Add(newEntity);
-        //    entityScriptList.Add(newEntity.GetComponent<EntityScript>());
-        //    Vector3 entityPos = new Vector3((COLS / 2) - (Mathf.Sqrt(entityCount) / 2) + i % (int)Mathf.Sqrt(entityCount), 0.0f, (ROWS / 2) - (Mathf.Sqrt(entityCount) / 2) + i % (int)Mathf.Sqrt(entityCount));
-        //    newEntity.transform.position = entityPos;
-        //}
-
-        //offsets = new int[,] { { 0, 3 }, { 3, 3 }, { 3, 0 }, { 3, -3 }, { 0, -3 }, { -3, -3 }, { -3, 0 }, { -3, 3 } };
-        //GenerateRandomMap(unitsMap);
-        //GenerateRandomMapFull(unitsMap);
-        //computeThread = new Thread(CalculateInfluenceMap);
-        //computeThread.Name = "ComputeThread";
-        //computeThreadJoined = false;
-        //computeReady = false;
-        //computeThread.Start();
     }
 
     
@@ -542,59 +560,107 @@ public class InfluenceMap : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        entityCountText.text = "Entities: " + entityList.Count;
 
-        if (!computeThreadJoined && computeReady)
-        {
-            computeThread.Join();
-            computeThreadJoined = true;
-            jobTimer.PrintTime("Influence time: ");
-            timerText.text = "Time:" + jobTimer.GetTimeStr();
-            RenderMapToTexture(influenceMapTexture);
-            Debug.Log("Compute thread joined!");
-        }
-
-        //if (computeThreadJoined && Input.GetKeyDown(KeyCode.LeftControl))
+        //if (!computeThreadJoined && computeReady)
         //{
-        //    StartComputeThread();
+        //    computeThread.Join();
+        //    computeThreadJoined = true;
+        //    jobTimer.PrintTime("Influence time: ");
+        //    timerText.text = "Time:" + jobTimer.GetTimeStr();
+        //    RenderMapToTexture(influenceMapTexture);
+        //    Debug.Log("Compute thread joined!");
         //}
 
-        if (computeThreadJoined && Input.GetKeyDown(KeyCode.Return))
-        {
-            GenerateRandomUnits();
+        unitCountText.text = "Unit count: " + unitCount.ToString();
 
-            GenerateRandomNativeMap(unitMapNative);
-            //GenerateRandomNativeMapFull(unitMapNative);
+        if(Input.GetKeyDown(KeyCode.Alpha1))
+        {
+            GenerateRandomUnitsStruct();
+            Debug.Log("Starting a new influence calc struct single threaded");
+            Timer timer = new Timer();
+            CalculateInfluenceMapStruct();
+            timer.Stop();
+            timerText.text = "Influence map time: " + timer.GetTimeStr();
+            influenceMap.CopyTo(influenceMapPrev, 0);
+            useNativeMap = false;
+
+
+            RenderMapToTexture(influenceMap);
+            //RenderNativeMapToTexture(influenceMapNativePrev, influenceMapTexture);
+        }
+
+        if (Input.GetKeyDown(KeyCode.Alpha2))
+        {
+            GenerateRandomUnitData(true);
+            Debug.Log("Starting a new influence calc single threaded");
+            Timer timer = new Timer();
+            CalculateInfluenceMap();
+            timer.Stop();
+            timerText.text = "Influence map time: " + timer.GetTimeStr();
+            influenceMap.CopyTo(influenceMapPrev, 0);
+            useNativeMap = false;
+
+            timer.Restart();
+            RenderMapToTexture(influenceMap);
+            timer.Stop();
+            renderTimerText.text = "Render time: " + timer.GetTimeStr();
+            //RenderNativeMapToTexture(influenceMapNativePrev, influenceMapTexture);
+        }
+
+        if (Input.GetKeyDown(KeyCode.Alpha3))
+        {
+            GenerateRandomUnitDataNative(false);
             Debug.Log("Starting a new influenceMapJob");
+            jobTimer.Restart();
+
             influenceMapJob = new InfluenceMapJob();
             influenceMapJob.influenceMap = influenceMapNative;
-            influenceMapJob.unitMap = unitMapNative;
-            influenceMapJob.unitXCords = unitXCords;
-            influenceMapJob.unitYCords = unitYCords;
-            influenceMapJob.unitInfs = unitInfs;
-
-            jobTimer.RestartTimer();
+            influenceMapJob.unitXCords = unitXCordsNative;
+            influenceMapJob.unitYCords = unitYCordsNative;
+            influenceMapJob.unitInfs = unitInfsNative;
             influenceMapJobHandle = influenceMapJob.Schedule(ROWS * COLS, ROWS);
+
             //JobHandle.ScheduleBatchedJobs();
             influenceJobReady = false;
-
             influenceMapJobHandle.Complete();
-            jobTimer.StopTimer();
-            jobTimer.PrintTime("Influence job time: ");
+
+            jobTimer.Stop();
             timerText.text = "Influence map time: " + jobTimer.GetTimeStr();
-            Debug.Log("InfluenceMapJob completed!");
-            //influenceMapNativePrev = influenceMapNative;
+
+            useNativeMap = true;
             influenceMapNative.CopyTo(influenceMapNativePrev);
-
-            //EntityManager.Instance.UpdateInfluenceMap(); // Dangerous to call from here
-
-            RenderNativeMapToTexture(influenceMapTexture);
             influenceJobReady = true;
 
+            RenderNativeMapToTexture(influenceMapNativePrev);
+        }
+
+        if(Input.GetKeyDown(KeyCode.Alpha4))
+        {
+            GenerateRandomUnitsStructNative(true);
+            Debug.Log("Starting a new influenceMapJobUnitStruct");
+            jobTimer.Restart();
+
+            influenceMapJobUnitStruct = new InfluenceMapJobUnitStruct();
+            influenceMapJobUnitStruct.influenceMap = influenceMapNative;
+            influenceMapJobUnitStruct.units = unitsNative;
+            influenceMapJobUnitStructHandle = influenceMapJobUnitStruct.Schedule(ROWS * COLS, ROWS);
+
+            //JobHandle.ScheduleBatchedJobs();
+            influenceJobReady = false;
+            influenceMapJobUnitStructHandle.Complete();
+
+            jobTimer.Stop();
+            timerText.text = "Influence map time: " + jobTimer.GetTimeStr();
+
+            useNativeMap = true;
+            influenceMapNative.CopyTo(influenceMapNativePrev);
+            influenceJobReady = true;
+
+            RenderNativeMapToTexture(influenceMapNativePrev);
         }
 
 
-        if(!influenceJobReady)
+        if (!influenceJobReady)
         {
             if(influenceMapJobHandle.IsCompleted)
             {
@@ -622,20 +688,6 @@ public class InfluenceMap : MonoBehaviour
             
             
         }
-
-        //if(influenceMapNativePrev.IsCreated && influenceMapNativePrev.Length > 0)
-        //{
-        //    //MoveEntity();
-        //    if(entityList.Count > 0)
-        //    {
-        //        MoveEntities();
-        //    }
-            
-        //}
-        
-
-        
-        //RenderMapToTexture(influenceMapTexture);
     }
 
     private void OnDestroy()
@@ -644,9 +696,9 @@ public class InfluenceMap : MonoBehaviour
         influenceMapNative.Dispose();
         influenceMapNativePrev.Dispose();
 
-        unitXCords.Dispose();
-        unitYCords.Dispose();
-        unitInfs.Dispose();
+        unitXCordsNative.Dispose();
+        unitYCordsNative.Dispose();
+        unitInfsNative.Dispose();
     }
 
     public int GetMapRows()
@@ -666,22 +718,64 @@ public class InfluenceMap : MonoBehaviour
     //    influenceMapNativePrev.Dispose();
     //}
 
-    public void StartComputeThread()
+
+
+    void GenerateRandomUnitData(bool deterministic = false)
     {
-        jobTimer.RestartTimer();
-        GenerateRandomMap(unitsMap);
-        //GenerateRandomMapFull(unitsMap);
-        computeThread = new Thread(CalculateInfluenceMap);
-        computeThread.Name = "ComputeThread";
-        computeThreadJoined = false;
-        computeReady = false;
-        computeThread.Start();
+        // Satunnaislukugeneraattorille voidaan asettaa ennalta valittu siemenluku deterministisen kartan luomiseksi.
+        if(deterministic)
+        {
+            Random.InitState(deterministicSeed);
+        }
+
+        // Valitaan luotavien yksiköiden määrä satunnaisesti.
+        int unitsGreen = Random.Range(minUnitsPerSide, maxUnitsPerSide);
+        int unitsRed = Random.Range(minUnitsPerSide, maxUnitsPerSide);
+
+        int totalUnits = unitsGreen + unitsRed;
+
+        unitXCords.Clear();
+        unitYCords.Clear();
+        unitInfs.Clear();
+
+        // Luodaan yksiköt
+
+        for (int i = 0; i < unitsGreen; i++)
+        {
+            int x = Random.Range(0, COLS - 1);
+            int y = Random.Range(0, ROWS - 1);
+            float influence = Random.Range(minInfluence, maxInfluence);
+
+            unitXCords.Add(x);
+            unitYCords.Add(y);
+            unitInfs.Add(influence);
+        }
+
+
+        for (int i = unitsGreen; i < totalUnits; i++)
+        {
+            int x = Random.Range(0, COLS - 1);
+            int y = Random.Range(0, ROWS - 1);
+            // Punaisille yksiköille annetaan negatiivinen vaikutusarvo.
+            float influence = Random.Range(minInfluence, maxInfluence) * -1.0f;
+
+            unitXCords.Add(x);
+            unitYCords.Add(y);
+            unitInfs.Add(influence);
+        }
+
+        unitCount = totalUnits;
     }
 
-
-    void GenerateRandomUnits()
+    void GenerateRandomUnitDataNative(bool deterministic = false)
     {
         Debug.Log("Generating random units...");
+
+        if(deterministic)
+        {
+            Random.InitState(deterministicSeed);
+        }
+        
 
         int unitsGreen = Random.Range(minUnitsPerSide, maxUnitsPerSide);
         int unitsRed = Random.Range(minUnitsPerSide, maxUnitsPerSide);
@@ -694,13 +788,13 @@ public class InfluenceMap : MonoBehaviour
 
         influenceMapJobHandle.Complete();
 
-        unitXCords.Dispose();
-        unitYCords.Dispose();
-        unitInfs.Dispose();
+        unitXCordsNative.Dispose();
+        unitYCordsNative.Dispose();
+        unitInfsNative.Dispose();
 
-        unitXCords = xCords;
-        unitYCords = yCords;
-        unitInfs = infs;
+        unitXCordsNative = xCords;
+        unitYCordsNative = yCords;
+        unitInfsNative = infs;
 
 
         for (int i = 0; i < unitsGreen; i++)
@@ -724,109 +818,101 @@ public class InfluenceMap : MonoBehaviour
             infs[i] = Random.Range(minInfluence, maxInfluence) * -1.0f;
         }
 
+        unitCount = totalUnits;
         Debug.Log("Random units generated!");
     }
 
-    void GenerateRandomNativeMap(NativeArray<float> map)
+    void GenerateRandomUnitsStructNative(bool deterministic = false)
     {
-        Debug.Log("Generating random map...");
-        ResetNativeMap(map);
+        Debug.Log("Generating random units...");
 
-        int unitsRed = Random.Range(minUnitsPerSide, maxUnitsPerSide);
-        int unitsGreen = Random.Range(minUnitsPerSide, maxUnitsPerSide);
-
-        for (int i = 0; i < unitsRed; i++)
+        if (deterministic)
         {
-            int x = Random.Range(0, COLS - 1);
-            int y = Random.Range(0, ROWS - 1);
-
-            int index = x * ROWS + y;
-            map[index] = Random.Range(minInfluence, maxInfluence);
+            Random.InitState(deterministicSeed);
         }
 
+        int unitsGreen = Random.Range(minUnitsPerSide, maxUnitsPerSide);
+        int unitsRed = Random.Range(minUnitsPerSide, maxUnitsPerSide);
+
+        int totalUnits = unitsGreen + unitsRed;
+
+        NativeArray<Unit> newUnits = new NativeArray<Unit>(totalUnits, Allocator.Persistent);
+
+        influenceMapJobUnitStructHandle.Complete();
+
+        if(unitsNative.IsCreated)
+        {
+            unitsNative.Dispose();
+        }
+        
+        unitsNative = newUnits;
 
         for (int i = 0; i < unitsGreen; i++)
         {
+            Unit greenUnit = new Unit();
             int x = Random.Range(0, COLS - 1);
             int y = Random.Range(0, ROWS - 1);
-
-            int index = x * ROWS + y;
-            map[index] = Random.Range(minInfluence, maxInfluence) * -1.0f;
+            greenUnit.x = x;
+            greenUnit.y = y;
+            greenUnit.influence = Random.Range(minInfluence, maxInfluence);
+            unitsNative[i] = greenUnit;
         }
 
-        Debug.Log("Random native map generated!");
-    }
-    void GenerateRandomMap(float[,] map)
-    {
-        Debug.Log("Generating random map...");
-        ResetMap(map);
-
-        int unitsRed = Random.Range(minUnitsPerSide, maxUnitsPerSide);
-        int unitsGreen = Random.Range(minUnitsPerSide, maxUnitsPerSide);
-
-        for (int i = 0; i < unitsRed; i++)
+        for (int i = unitsGreen; i < totalUnits; i++)
         {
+            Unit redUnit = new Unit();
             int x = Random.Range(0, COLS - 1);
             int y = Random.Range(0, ROWS - 1);
-
-            map[x, y] = Random.Range(minInfluence, maxInfluence);
+            redUnit.x = x;
+            redUnit.y = y;
+            redUnit.influence = Random.Range(minInfluence, maxInfluence) * -1.0f;
+            unitsNative[i] = redUnit;
         }
 
+        unitCount = totalUnits;
+        Debug.Log("Random units generated!");
+    }
+
+    void GenerateRandomUnitsStruct(bool deterministic = false)
+    {
+        Debug.Log("Generating random units struct...");
+
+        if(deterministic)
+        {
+            Random.InitState(deterministicSeed);
+        }
+
+        int unitsGreen = Random.Range(minUnitsPerSide, maxUnitsPerSide);
+        int unitsRed = Random.Range(minUnitsPerSide, maxUnitsPerSide);
+
+        int totalUnits = unitsGreen + unitsRed;
+
+        units.Clear();
 
         for (int i = 0; i < unitsGreen; i++)
         {
+            Unit greenUnit = new Unit(); 
             int x = Random.Range(0, COLS - 1);
             int y = Random.Range(0, ROWS - 1);
-
-            map[x, y] = Random.Range(minInfluence, maxInfluence) * -1.0f;
+            greenUnit.x = x;
+            greenUnit.y = y;
+            greenUnit.influence = Random.Range(minInfluence, maxInfluence);
+            units.Add(greenUnit);
         }
 
-        Debug.Log("Random map generated!");
-    }
-
-    void GenerateRandomMapFull(float[,] map)
-    {
-        Debug.Log("Generating random map full...");
-        ResetMap(map);
-
-        for (int x = 0; x < COLS; x++)
+        for (int i = unitsGreen; i < totalUnits; i++)
         {
-            for (int y = 0; y < ROWS; y++)
-            {
-                int side = Random.Range(0, 2);
-                map[x, y] = Random.Range(minInfluence, maxInfluence);
-
-                if (side == 1)
-                {
-                    map[x, y] *= -1.0f;
-                }
-            }
+            Unit redUnit = new Unit();
+            int x = Random.Range(0, COLS - 1);
+            int y = Random.Range(0, ROWS - 1);
+            redUnit.x = x;
+            redUnit.y = y;
+            redUnit.influence = Random.Range(minInfluence, maxInfluence) * -1.0f;
+            units.Add(redUnit);
         }
 
-        Debug.Log("Random map filled with units generated!");
-    }
-
-    void GenerateRandomNativeMapFull(NativeArray<float> map)
-    {
-        Debug.Log("Generating random native map full...");
-        ResetNativeMap(map);
-
-        for (int x = 0; x < COLS; x++)
-        {
-            for (int y = 0; y < ROWS; y++)
-            {
-                int side = Random.Range(0, 2);
-                int index = x * ROWS + y;
-                map[index] = Random.Range(minInfluence, maxInfluence);
-
-                if (side == 1)
-                {
-                    map[index] *= -1.0f;
-                }
-            }
-        }
-
-        Debug.Log("Random native map filled with units generated!");
+        unitCount = totalUnits;
+        Debug.Log("Random units generated!");
     }
 
     void ResetNativeMap(NativeArray<float> map)
@@ -840,72 +926,207 @@ public class InfluenceMap : MonoBehaviour
                 map[index] = 0;
             }
         }
+        unitCount = 0;
         Debug.Log("Map reset!");
     }
 
-    void ResetMap(float[,] map)
+    void ResetMap(float[] map)
     {
         Debug.Log("Resetting map...");
         for (int x = 0; x < COLS; x++)
         {
             for (int y = 0; y < COLS; y++)
             {
-                map[x, y] = 0;
+                int index = x * ROWS + y;
+                map[index] = 0;
             }
         }
+        unitCount = 0;
         Debug.Log("Map reset!");
     }
 
     // Calculates Euclidean distance between points
-    float Distance(int col0, int row0, int col1, int row1)
+    static float Distance(int col0, int row0, int col1, int row1)
     {
         return Mathf.Sqrt((float)(col1 - col0) * (col1 - col0) + (row1 - row0) * (row1 - row0));
     }
 
+    // Calculates Euclidean distance between points
+    static float Distance(float col0, float row0, float col1, float row1)
+    {
+        return Mathf.Sqrt((float)(col1 - col0) * (col1 - col0) + (row1 - row0) * (row1 - row0));
+    }
+
+    // SOME INTRINSICS REQUIRE TO ENABLED IN PROJECT SETTINGS 
+    static float horizontal_sumf(v256 x)
+    {
+        v128 hi = mm256_extractf128_ps(x, 1);
+        v128 lo = mm256_extractf128_ps(x, 0);
+        lo = add_ps(hi, lo);
+        hi = movehl_ps(hi, lo);
+        lo = add_ps(hi, lo);
+        hi = shuffle_ps(lo, lo, 1);
+        lo = add_ss(hi, lo);
+        return cvtss_f32(lo);
+    }
+
+    static v256 CalcDistVector8f_v256(v256 c0, v256 r0, v256 c1, v256 r1)
+    {
+        if (IsFmaSupported)
+        {
+            v256 colSubVector = mm256_sub_ps(c1, c0);
+
+            v256 rowSubVector = mm256_sub_ps(r1, r0);
+
+            v256 rowMulVector = mm256_mul_ps(rowSubVector, rowSubVector);
+
+            v256 sumVector = mm256_fmadd_ps(colSubVector, colSubVector, rowMulVector);
+
+            v256 sqrtVector = mm256_sqrt_ps(sumVector);
+
+            return sqrtVector;
+        }
+        else
+        {
+            v256 colSubVector = mm256_sub_ps(c1, c0);
+
+            v256 rowSubVector = mm256_sub_ps(r1, r0);
+
+            v256 colMulVector = mm256_mul_ps(colSubVector, colSubVector);
+            v256 rowMulVector = mm256_mul_ps(rowSubVector, rowSubVector);
+
+            v256 sumVector = mm256_add_ps(colMulVector, rowMulVector);
+
+
+            v256 rsqrtVector = mm256_rsqrt_ps(sumVector);
+            v256 sqrtVector = mm256_rcp_ps(rsqrtVector); // minimal loss of accuracy (max relative error: 1.5*2^-12)
+
+            return sqrtVector;
+        }
+    }
+
+    static float4 CalcDistFloat4(float4 c0, float4 r0, float4 c1, float4 r1)
+    {
+        return sqrt((c1 - c0) * (c1 - c0) + (r1 - r0) * (r1 - r0));
+    }
+
+    //static float4 CalcDistFloat4(float4 c0, float4 r0, float4 c1, float4 r1)
+    //{
+    //    return sqrt((c1 - c0) * (c1 - c0) + (r1 - r0) * (r1 - r0));
+
+    //    //if (IsFmaSupported)
+    //    //{
+    //    //    float4 colSubVector = c1 - c0;
+
+    //    //    float4 rowSubVector = r1 - r0;
+
+    //    //    float4 rowMulVector = rowSubVector * rowSubVector;
+
+    //    //    float4 sumVector = math.mad(colSubVector, colSubVector, rowMulVector);
+
+    //    //    float4 sqrtVector = math.sqrt(sumVector);
+
+    //    //    return sqrtVector;
+    //    //}
+    //    //else
+    //    //{
+    //    //    float4 colSubVector = c1 - c0;
+
+    //    //    float4 rowSubVector = r1 - r0;
+
+    //    //    float4 colMulVector = colSubVector * colSubVector;
+    //    //    float4 rowMulVector = rowSubVector * rowSubVector;
+
+    //    //    float4 sumVector = colMulVector + rowMulVector;
+
+
+    //    //    float4 rsqrtVector = math.rsqrt(sumVector);
+    //    //    float4 sqrtVector = math.rcp(rsqrtVector); // minimal loss of accuracy (max relative error: 1.5*2^-12)
+
+    //    //    return sqrtVector;
+    //    //}
+    //}
+
     // Calculates and returns influence for a single point in the influence map
+    float CalcPointInfStruct(int col, int row)
+    {
+        float totalInf = 0.0f;
+        for (int i = 0; i < units.Count; i++)
+        {
+            int x = units[i].x;
+            int y = units[i].y;
+
+            float dist = Distance(col, row, x, y);
+
+            totalInf += units[i].influence / (1 + dist);
+        }
+        return totalInf;
+    }
+
     float CalculatePointInfluence(int col, int row)
     {
-        float totalInfluence = 0.0f;
+        float totalInfluence = 0.0f; // Kokonaisvaikutus.
+
+        // Käydään läpi kaikki yksiköt ja summataan niiden vaikutus.
+        for (int i = 0; i < unitInfs.Count; i++)
+        {
+            int x = unitXCords[i];
+            int y = unitYCords[i];
+
+            // Lasketaan yksikön etäisyys ruudusta.
+            float distance = Distance(col, row, x, y);
+
+            // Yksikön vaikutus ruutuun laskee etäisyyden mukaan.
+            totalInfluence += unitInfs[i] / (1 + distance);
+        }
+        return totalInfluence;
+    }
+
+    void CalculateInfluenceMapStruct()
+    {
+        //Debug.Log("Calculating influence map...");
+        //Timer influenceTimer = new Timer();
+
         for (int x = 0; x < COLS; x++)
         {
             for (int y = 0; y < ROWS; y++)
             {
-                float distance = Distance(col, row, x, y);
-                //Debug.Log("Distance: " + distance);
-                totalInfluence += unitsMap[x, y] / (1 + distance); // Influence of units on a point drops with relative to distance
+                int index = x * ROWS + y;
+                influenceMap[index] = CalcPointInfStruct(x, y);
             }
         }
 
-        return totalInfluence;
+        //influenceTimer.Stop();
+        //influenceTimer.PrintTime("InfluenceTimer");
+        //Debug.Log("Influence map calculated");
     }
 
     void CalculateInfluenceMap()
     {
-        Debug.Log(Thread.CurrentThread.Name + " computing...");
-        Debug.Log("Calculating influence map...");
-        Timer influenceTimer = new Timer();
-        for (int x = 0; x < COLS; x++)
-        {
-            for (int y = 0; y < COLS; y++)
-            {
-                influenceMap[x, y] = CalculatePointInfluence(x, y);
-            }
-        }
-        influenceTimer.PrintTime("InfluenceTimer");
-        Debug.Log("Influence map calculated");
-        computeReady = true;
-    }
-
-    void RenderMapToTexture(Texture2D mapTexture)
-    {
-        //Debug.Log("Rendering map to texture...");
-        Timer renderTimer = new Timer();
         for (int x = 0; x < COLS; x++)
         {
             for (int y = 0; y < ROWS; y++)
             {
-                float alpha = 255 * Mathf.Abs(influenceMap[x, y]);
+                int index = x * ROWS + y;
+                influenceMap[index] = CalculatePointInfluence(x, y);
+            }
+        }
+    }
 
+    void RenderMapToTexture(float[] map)
+    {
+        // Käydään kaikki kartan ruudut läpi.
+        for (int x = 0; x < COLS; x++)
+        {
+            for (int y = 0; y < ROWS; y++)
+            {
+                int index = x * ROWS + y;
+
+                // Muutetaan värin läpinäkyvyyttä vaikutuksen itseisarvon mukaan.
+                float influence = map[index]; 
+                float alpha = 255 * Mathf.Abs(influence);
+
+                // Puristetaan läpinäkyvyys välille 0-255.
                 if (alpha < 0.0f)
                 {
                     alpha = 0.0f;
@@ -915,29 +1136,25 @@ public class InfluenceMap : MonoBehaviour
                     alpha = 255.0f;
                 }
 
-
-                if (influenceMap[x, y] > 0)
+                // Asetetaan tekstuuriin vaikutusta vastaava pikseli.
+                if (influence >= 0)
                 {
                     greenColor.a = (byte)alpha;
-                    mapTexture.SetPixel(x, y, greenColor);
+                    influenceMapTexture.SetPixel(x, y, greenColor);
                 }
                 else
                 {
                     redColor.a = (byte)alpha;
-                    mapTexture.SetPixel(x, y, redColor);
+                    influenceMapTexture.SetPixel(x, y, redColor);
                 }
             }
         }
 
-        mapTexture.SetPixel(30, 100, Color.blue);
-        mapTexture.Apply();
-        renderer.material.SetTexture(textureID, mapTexture);
-        renderer.material.SetColor(textureColorID, Color.white);
-        //renderTimer.PrintTime("RenderTimer");
-        //Debug.Log("Rendered map to texture");
+        // Päivitetään tekstuuri.
+        influenceMapTexture.Apply();
     }
 
-    void RenderNativeMapToTexture(Texture2D mapTexture)
+    void RenderNativeMapToTexture(NativeArray<float> map)
     {
         Timer renderTimer = new Timer();
         for (int x = 0; x < COLS; x++)
@@ -946,8 +1163,7 @@ public class InfluenceMap : MonoBehaviour
             {
                 int index = x * ROWS + y;
 
-                float influence = influenceMapNative[index];
-
+                float influence = map[index];
                 float alpha = 255 * Mathf.Abs(influence);
 
                 if (alpha < 0.0f)
@@ -963,19 +1179,19 @@ public class InfluenceMap : MonoBehaviour
                 if (influence >= 0)
                 {
                     greenColor.a = (byte)alpha;
-                    mapTexture.SetPixel(x, y, greenColor);
+                    influenceMapTexture.SetPixel(x, y, greenColor);
                 }
                 else
                 {
                     redColor.a = (byte)alpha;
-                    mapTexture.SetPixel(x, y, redColor);
+                    influenceMapTexture.SetPixel(x, y, redColor);
                 }
             }
         }
 
 
-        mapTexture.Apply();
-        renderer.material.SetTexture(textureID, mapTexture);
+        influenceMapTexture.Apply();
+        renderer.material.SetTexture(textureID, influenceMapTexture);
         renderer.material.SetColor(textureColorID, Color.white);
         //renderTimer.PrintTime("RenderTimer");
         //Debug.Log("Rendered map to texture");

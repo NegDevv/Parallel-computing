@@ -591,11 +591,12 @@ PlayerSettings:
   webGLThreadsSupport: 0
   webGLDecompressionFallback: 0
   scriptingDefineSymbols:
-    1: UNITY_BURST_EXPERIMENTAL_LOOP_INTRINSICS;-unsafe
+    1: UNITY_BURST_EXPERIMENTAL_LOOP_INTRINSICS
   additionalCompilerArguments:
     1: []
   platformArchitecture: {}
-  scriptingBackend: {}
+  scriptingBackend:
+    Standalone: 0
   il2cppCompilerConfiguration: {}
   managedStrippingLevel: {}
   incrementalIl2cppBuild: {}
