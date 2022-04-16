@@ -20,26 +20,32 @@ struct EntityMovementJob : IJobParallelForTransform
     [ReadOnly] public float deltaTime;
 
 
+    // Liikuttaa parametrina saatua Transformia.
     public void Execute(int index, TransformAccess transform)
     {
         float x = transform.position.x;
         float y = transform.position.z;
 
-        // Truncated x and y coordinates
+        // Pyöristetaan koordinaatit kokonaisluvuiksi vaikutuskartan indeksointia varten.
         int intX = Mathf.RoundToInt(x);
         int intY = Mathf.RoundToInt(y);
 
-
+        // Haetaan olion puoli.
         bool side = entitySides[index];
 
-        int moveIndex = intX * ROWS + intY; // Default move is the current position
+        int moveIndex = intX * ROWS + intY; // Vakiona liikutaan nykyiseen ruutuun.
+
+        // Asetetaan korkein vaikutus nykyisen ruudun mukaan.
         float highestInfluence = influenceMap[moveIndex];
 
+        // Käydään läpi kaikki ruudut välittömässä läheisyydessä
+        // ja valitaan ruutu jolla on korkein vaikutus olion puolta kohtaan.
         for (int i = 0; i < offsets.Length; i += 2)
         {
             int xPos = intX + offsets[i];
             int yPos = intY + offsets[i + 1];
 
+            // Tarkistetaan että koordinaatit ovat kartan sisällä.
             if(xPos < 0 || xPos >= COLS
                 || yPos < 0 || yPos >= ROWS)
             {
@@ -47,8 +53,11 @@ struct EntityMovementJob : IJobParallelForTransform
             }
             else
             {
+                // Lasketaan koordinaatteja vastaava taulukon indeksi
+                // ja haetaan sitä vastaava vaikutusarvo vaikutuskartasta.
                 int mapIndex = xPos * ROWS + yPos;
 
+                // Päivitetään korkein vaikutusarvo ja liikkumis indeksi puolen mukaan.
                 if (mapIndex >= 0 && mapIndex < influenceMap.Length)
                 {
                     float influence = influenceMap[mapIndex];
@@ -72,17 +81,20 @@ struct EntityMovementJob : IJobParallelForTransform
             }
         }
 
+        // Muunnetaan yksiulotteinen taulukon ineksi x- ja y-koordinaateiksi.
         float moveX = moveIndex / ROWS;
         float moveY = moveIndex % ROWS;
 
+        // Lasketaan liikkumis suunta nykyisestä ruudusta.
         Vector3 moveVector = new Vector3(moveX - intX, 0.0f, moveY - intY);
         float modifiedMoveSpeed = 0;
         if (moveSpeed > 0)
         {
+            // Muunnetaan liikkumisnopeutta korkeimman vaikutuksen mukaan.
             modifiedMoveSpeed = moveSpeed + Mathf.Abs(highestInfluence) * 5;
         }
 
-        //transform.position += moveVector * moveSpeed * deltaTime;
+        // Päivitetään Transformin sijaintia likkumisuunnan ja nopeuden mukaan.
         transform.position += moveVector * modifiedMoveSpeed * deltaTime;
     }
 }
@@ -166,9 +178,9 @@ public class EntityManager : MonoBehaviour
         {
             if (entityList.Count > 0)
             {
-                //EntityMovementMT();
+                EntityMovementMT();
                 
-                EntityMovement();
+                //EntityMovement();
             }
         }
 
@@ -307,8 +319,7 @@ public class EntityManager : MonoBehaviour
     public void EntityMovementMT()
     {
         timer.Restart();
-        entityMovementJob = new EntityMovementJob();
-
+        
         if(entitiesChanged)
         {
             if (entitySidesArray.IsCreated)
@@ -328,26 +339,33 @@ public class EntityManager : MonoBehaviour
 
             entitiesChanged = false;
         }
-        
-        
-        entityMovementJob.entitySides = entitySidesArray;
-        entityMovementJob.influenceMap = this.influenceMap;
-        entityMovementJob.COLS = this.COLS;
-        entityMovementJob.ROWS = this.ROWS;
-        entityMovementJob.offsets = offsetArray;
-        entityMovementJob.moveSpeed = entityMoveSpeed;
-        entityMovementJob.deltaTime = Time.deltaTime;
+
+        entityMovementJob = new EntityMovementJob
+        {
+            entitySides = entitySidesArray,
+            influenceMap = this.influenceMap,
+            COLS = this.COLS,
+            ROWS = this.ROWS,
+            offsets = offsetArray,
+            moveSpeed = entityMoveSpeed,
+            deltaTime = Time.deltaTime
+        };
+
+        // Jobin ajoittaminen suoritettavaksi.
         movementJobHandle = entityMovementJob.Schedule(transformAccessArray);
-        JobHandle.ScheduleBatchedJobs();
+        movementJobHandle.Complete();
+
+        //JobHandle.ScheduleBatchedJobs();
 
         timer.Stop();
+
         movementUpdateTimeText.text = "Movement update time: " + timer.GetTimeStr();
 
     }
 
     private void LateUpdate()
     {
-        movementJobHandle.Complete();
+        
         UpdateInfluenceMap();
     }
 

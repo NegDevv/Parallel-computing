@@ -1,28 +1,17 @@
-using System.Collections;
 using System.Collections.Generic;
-using System.Threading;
-using UnityEngine;
-using Diagnostics = System.Diagnostics;
-using Unity.Jobs;
-using Unity.Collections;
+using TMPro;
 using Unity.Burst;
 using Unity.Burst.Intrinsics;
-using float4 = Unity.Mathematics.float4;
-using static Unity.Mathematics.math;
+using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
-using TMPro;
-
-using static Unity.Burst.Intrinsics.X86;
-using static Unity.Burst.Intrinsics.X86.Sse;
-using static Unity.Burst.Intrinsics.X86.Sse2;
-using static Unity.Burst.Intrinsics.X86.Sse3;
-using static Unity.Burst.Intrinsics.X86.Ssse3;
-using static Unity.Burst.Intrinsics.X86.Sse4_1;
-using static Unity.Burst.Intrinsics.X86.Sse4_2;
-using static Unity.Burst.Intrinsics.X86.Popcnt;
+using Unity.Jobs;
+using UnityEngine;
 using static Unity.Burst.Intrinsics.X86.Avx;
-using static Unity.Burst.Intrinsics.X86.Avx2;
 using static Unity.Burst.Intrinsics.X86.Fma;
+using static Unity.Burst.Intrinsics.X86.Sse;
+using static Unity.Mathematics.math;
+using Diagnostics = System.Diagnostics;
+using float4 = Unity.Mathematics.float4;
 
 
 public class Timer
@@ -228,8 +217,8 @@ public class InfluenceMap : MonoBehaviour
                 int x = index / ROWS;
                 int y = index % ROWS;
 
-                float influencePoint = CalcPointInfUnitStructAVX(x, y);
-                //float influencePoint = CalculatePointInfluenceUnitStructFloat4(x, y);
+                //float influencePoint = CalcPointInfUnitStructAVX(x, y);
+                float influencePoint = CalculatePointInfluenceUnitStructFloat4(x, y);
                 influenceMap[index] = influencePoint;
             }
             else
@@ -244,7 +233,7 @@ public class InfluenceMap : MonoBehaviour
     }
 
     [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
-    struct InfluenceMapJob : IJobParallelFor
+    struct InfluenceMapJobVectorized : IJobParallelFor
     {
         public NativeArray<float> influenceMap;
 
@@ -419,14 +408,15 @@ public class InfluenceMap : MonoBehaviour
 
         public void Execute(int index)
         {
+
             if (IsAvxSupported)
             {
                 int x = index / ROWS;
                 int y = index % ROWS;
 
-                float influencePoint = CalcPointInfAVX(x, y);
+                //float influencePoint = CalcPointInfAVX(x, y);
                 //float influencePoint = CalcPointInfUnsafeAVX(x, y);
-                //float influencePoint = CalculatePointInfluenceFloat4(x, y);
+                float influencePoint = CalculatePointInfluenceFloat4(x, y);
                 influenceMap[index] = influencePoint;
             }
             else
@@ -436,6 +426,97 @@ public class InfluenceMap : MonoBehaviour
 
                 float influencePoint = CalculatePointInfluence(x, y);
                 influenceMap[index] = influencePoint;
+            }
+        }
+    }
+
+    [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
+    struct InfluenceMapJob : IJobParallelFor
+    {
+        // Vaikutuskartta tallennetaan NativeArray-taulukkoon.
+        public NativeArray<float> influenceMap;
+
+        // Yksikködata välitetään kolmena NativeArray-taulukkona.
+        [ReadOnly] public NativeArray<int> unitXCords;
+        [ReadOnly] public NativeArray<int> unitYCords;
+        [ReadOnly] public NativeArray<float> unitInfs;
+
+        // Laskee ja palauttaa vaikutusarvon yhdelle kartan ruudulle.
+        float CalculatePointInfluence(int col, int row)
+        {
+            float totalInfluence = 0.0f; // Kokonaisvaikutus.
+
+            // Käydään läpi kaikki yksiköt ja summataan niiden vaikutus.
+            for (int i = 0; i < unitInfs.Length; i++)
+            {
+                int x = unitXCords[i];
+                int y = unitYCords[i];
+
+                // Lasketaan yksikön etäisyys ruudusta.
+                float dist = Distance(col, row, x, y);
+
+                // Yksikön vaikutus ruutuun laskee etäisyyden mukaan.
+                totalInfluence += unitInfs[i] / (1 + dist);
+            }
+            return totalInfluence;
+        }
+
+        // Kutsutaan yhtä vaikutuskartan ruutua kohden.
+        public void Execute(int index)
+        {
+            // Muunnetaan yksiulotteinen taulukon indeksi x- ja y-koordinaateiksi.
+            int x = index / ROWS;
+            int y = index % ROWS;
+
+            // Lasketaan ruudun vaikutus ja tallennetaan se vaikutuskarttaan käsiteltävään indeksiin.
+            float influencePoint = CalculatePointInfluence(x, y);
+            influenceMap[index] = influencePoint;
+        }
+    }
+
+
+    [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
+    struct InfluenceMapJobST : IJob
+    {
+        // Vaikutuskartta tallennetaan NativeArray-taulukkoon.
+        public NativeArray<float> influenceMap;
+
+        // Yksikködata välitetään kolmena NativeArray-taulukkona.
+        [ReadOnly] public NativeArray<int> unitXCords;
+        [ReadOnly] public NativeArray<int> unitYCords;
+        [ReadOnly] public NativeArray<float> unitInfs;
+
+        // Laskee ja palauttaa vaikutusarvon yhdelle kartan ruudulle.
+        float CalculatePointInfluence(int col, int row)
+        {
+            float totalInfluence = 0.0f; // Kokonaisvaikutus.
+
+            // Käydään läpi kaikki yksiköt ja summataan niiden vaikutus.
+            for (int i = 0; i < unitInfs.Length; i++)
+            {
+                int x = unitXCords[i];
+                int y = unitYCords[i];
+
+                // Lasketaan yksikön etäisyys ruudusta.
+                float dist = Distance(col, row, x, y);
+
+                // Yksikön vaikutus ruutuun laskee etäisyyden mukaan.
+                totalInfluence += unitInfs[i] / (1 + dist);
+            }
+            return totalInfluence;
+        }
+
+        public void Execute()
+        {
+            for (int x = 0; x < COLS; x++)
+            {
+                for (int y = 0; y < ROWS; y++)
+                {
+                    int index = x * ROWS + y;
+                    // Lasketaan ruudun vaikutus ja tallennetaan se vaikutuskarttaan käsiteltävään indeksiin.
+                    float influencePoint = CalculatePointInfluence(x, y);
+                    influenceMap[index] = influencePoint;
+                }
             }
         }
     }
@@ -477,7 +558,6 @@ public class InfluenceMap : MonoBehaviour
     public NativeArray<float> unitInfsNative;
 
 
-    public NativeArray<float> unitMapNative;
     public NativeArray<float> influenceMapNative;
     public NativeArray<float> influenceMapNativePrev;
 
@@ -488,19 +568,21 @@ public class InfluenceMap : MonoBehaviour
     int textureID;
     int textureColorID;
 
-    Thread computeThread = null;
-    bool computeThreadJoined = true;
-    bool computeReady = true;
-
     JobHandle influenceMapJobHandle;
     InfluenceMapJob influenceMapJob;
+
+    JobHandle influenceMapJobSTHandle;
+    InfluenceMapJobST influenceMapJobST;
+
+    JobHandle influenceMapJobVectorizedHandle;
+    InfluenceMapJobVectorized influenceMapJobVectorized;
 
     JobHandle influenceMapJobUnitStructHandle;
     InfluenceMapJobUnitStruct influenceMapJobUnitStruct;
 
     bool influenceJobReady = false;
 
-    Timer jobTimer;
+    Timer influenceMapTimer;
 
     [SerializeField] TMP_Text timerText;
     [SerializeField] TMP_Text renderTimerText;
@@ -530,10 +612,12 @@ public class InfluenceMap : MonoBehaviour
         unitInfs = new List<float>();
 
         influenceMap = new float[COLS * ROWS];
-
         influenceMapPrev = new float[COLS * ROWS];
 
-        unitMapNative = new NativeArray<float>(ROWS* COLS, Allocator.Persistent);
+        unitXCordsNative = new NativeArray<int>(1, Allocator.Persistent);
+        unitYCordsNative = new NativeArray<int>(1, Allocator.Persistent);
+        unitInfsNative = new NativeArray<float>(1, Allocator.Persistent);
+
         influenceMapNative = new NativeArray<float>(ROWS* COLS, Allocator.Persistent);
         influenceMapNativePrev = new NativeArray<float>(ROWS * COLS, Allocator.Persistent);
 
@@ -544,18 +628,202 @@ public class InfluenceMap : MonoBehaviour
         renderer.material.SetTexture(textureID, influenceMapTexture);
         renderer.material.SetColor(textureColorID, Color.white);
 
-        unitXCordsNative = new NativeArray<int>(10, Allocator.Persistent);
-        unitYCordsNative = new NativeArray<int>(10, Allocator.Persistent);
-        unitInfsNative = new NativeArray<float>(10, Allocator.Persistent);
-
+        
         mapSizeText.text = "Map size: " + COLS + " x " + ROWS;
-        jobTimer = new Timer();
+        influenceMapTimer = new Timer();
 
         offsets = new int[,] { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 1, -1 }, { 0, -1 }, { -1, -1 }, { -1, 0 }, { -1, 1 } };
     }
 
     
+    public void InfluenceMapTest()
+    {
+        GenerateRandomUnitData(true);
 
+        Debug.Log("Starting a new influence calc single threaded");
+
+        influenceMapTimer.Restart();
+        CalculateInfluenceMap();
+        influenceMapTimer.Stop();
+
+        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+
+        influenceMap.CopyTo(influenceMapPrev, 0);
+        useNativeMap = false;
+
+        influenceMapTimer.Restart();
+        RenderMapToTexture(influenceMap);
+        influenceMapTimer.Stop();
+
+        renderTimerText.text = "Render time: " + influenceMapTimer.GetTimeStr();
+        //RenderNativeMapToTexture(influenceMapNativePrev, influenceMapTexture);
+    }
+
+    public void InfluenceMapStructTest()
+    {
+        GenerateRandomUnitsStruct();
+
+        Debug.Log("Starting a new influence calc struct single threaded");
+
+        Timer timer = new Timer();
+        CalculateInfluenceMapStruct();
+        timer.Stop();
+
+        timerText.text = "Influence map time: " + timer.GetTimeStr();
+
+        influenceMap.CopyTo(influenceMapPrev, 0);
+        useNativeMap = false;
+
+        RenderMapToTexture(influenceMap);
+        //RenderNativeMapToTexture(influenceMapNativePrev, influenceMapTexture);
+    }
+
+    public void InfluenceMapJobTest()
+    {
+        // Generoidaan satunnainen yksikködata.
+        GenerateRandomUnitDataNative(false);
+
+        Debug.Log("Starting a new influenceMapJob");
+
+        influenceMapTimer.Restart();
+
+        // Jobin luonti.
+        influenceMapJob = new InfluenceMapJob
+        {
+            influenceMap = influenceMapNative,
+            unitXCords = unitXCordsNative,
+            unitYCords = unitYCordsNative,
+            unitInfs = unitInfsNative
+        };
+
+        // Ajoitetaan Jobi suoritettavaksi.
+        influenceMapJobHandle = influenceMapJob.Schedule(ROWS * COLS, ROWS);
+
+        // Varmistetaan Jobin valmistuminen.
+        influenceMapJobHandle.Complete();
+
+        influenceMapTimer.Stop();
+
+        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+
+        // Merkitään minkä tyyppista dataa käytetään, EntityManageria varten.
+        useNativeMap = true;
+
+        // Kopioidaan juuri laskettu kartta toiseen taulukkoon,
+        // jotta sitä voidaan käyttää mahdollisessa tilanteessa,
+        // jossa uuden kartan laskeminen on kesken.
+        influenceMapNative.CopyTo(influenceMapNativePrev);
+
+        // Visualisoidaan kartta tekstuuriin.
+        RenderNativeMapToTexture(influenceMapNativePrev);
+    }
+
+    public void InfluenceMapJobSTTest()
+    {
+        // Generoidaan satunnainen yksikködata.
+        GenerateRandomUnitDataNative(false);
+
+        Debug.Log("Starting a new influenceMapJob");
+        influenceMapTimer.Restart();
+
+        // Jobin luonti.
+        influenceMapJobST = new InfluenceMapJobST
+        {
+            influenceMap = influenceMapNative,
+            unitXCords = unitXCordsNative,
+            unitYCords = unitYCordsNative,
+            unitInfs = unitInfsNative
+        };
+
+        // Ajoitetaan Jobi suoritettavaksi.
+        influenceMapJobSTHandle = influenceMapJobST.Schedule();
+
+        // Varmistetaan Jobin valmistuminen.
+        influenceMapJobSTHandle.Complete();
+
+        influenceMapTimer.Stop();
+        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+
+        // Merkitään minkä tyyppista dataa käytetään, EntityManageria varten.
+        useNativeMap = true;
+
+        // Kopioidaan juuri laskettu kartta toiseen taulukkoon,
+        // jotta sitä voidaan käyttää mahdollisessa tilanteessa,
+        // jossa uuden kartan laskeminen on kesken.
+        influenceMapNative.CopyTo(influenceMapNativePrev);
+
+        // Visualisoidaan kartta tekstuuriin.
+        RenderNativeMapToTexture(influenceMapNativePrev);
+    }
+    public void InfluenceMapJobVectorizedTest()
+    {
+        // Generoidaan satunnainen yksikködata.
+        GenerateRandomUnitDataNative(false);
+        Debug.Log("Starting a new influenceMapJobVectorized");
+
+        influenceMapTimer.Restart();
+
+        // Vektorisoidun Jobin luonti.
+        influenceMapJobVectorized = new InfluenceMapJobVectorized
+        {
+            influenceMap = influenceMapNative,
+            unitXCords = unitXCordsNative,
+            unitYCords = unitYCordsNative,
+            unitInfs = unitInfsNative
+        };
+
+        // Ajoitetaan Jobi suoritettavaksi.
+        influenceMapJobVectorizedHandle = influenceMapJobVectorized.Schedule(ROWS * COLS, ROWS);
+
+        // Varmistetaan Jobin valmistuminen.
+        influenceMapJobVectorizedHandle.Complete();
+
+        influenceMapTimer.Stop();
+        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+
+        // Merkitään minkä tyyppista dataa käytetään, EntityManageria varten.
+        useNativeMap = true;
+        influenceMapNative.CopyTo(influenceMapNativePrev);
+
+        // Visualisoidaan kartta tekstuuriin.
+        RenderNativeMapToTexture(influenceMapNativePrev);
+    }
+
+    public void InfluenceMapJobStructTest()
+    {
+        // Generoidaan satunnainen yksikködata.
+        GenerateRandomUnitsStructNative(true);
+        Debug.Log("Starting a new influenceMapJobUnitStruct");
+
+        influenceMapTimer.Restart();
+
+        // Yksikkö tietueita käyttävän Jobin luonti.
+        influenceMapJobUnitStruct = new InfluenceMapJobUnitStruct
+        {
+            influenceMap = influenceMapNative,
+            units = unitsNative
+        };
+
+        // Ajoitetaan Jobi suoritettavaksi.
+        influenceMapJobUnitStructHandle = influenceMapJobUnitStruct.Schedule(ROWS * COLS, ROWS);
+
+        // Varmistetaan Jobin valmistuminen.
+        influenceMapJobUnitStructHandle.Complete();
+
+        influenceMapTimer.Stop();
+        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+
+        // Merkitään minkä tyyppista dataa käytetään, EntityManageria varten.
+        useNativeMap = true;
+
+        // Kopioidaan juuri laskettu kartta toiseen taulukkoon,
+        // jotta sitä voidaan käyttää mahdollisessa tilanteessa,
+        // jossa uuden kartan laskeminen on kesken.
+        influenceMapNative.CopyTo(influenceMapNativePrev);
+
+        // Visualisoidaan kartta tekstuuriin.
+        RenderNativeMapToTexture(influenceMapNativePrev);
+    }
 
     // Update is called once per frame
     void Update()
@@ -573,126 +841,40 @@ public class InfluenceMap : MonoBehaviour
 
         unitCountText.text = "Unit count: " + unitCount.ToString();
 
-        if(Input.GetKeyDown(KeyCode.Alpha1))
+
+        if (Input.GetKeyDown(KeyCode.Alpha1))
         {
-            GenerateRandomUnitsStruct();
-            Debug.Log("Starting a new influence calc struct single threaded");
-            Timer timer = new Timer();
-            CalculateInfluenceMapStruct();
-            timer.Stop();
-            timerText.text = "Influence map time: " + timer.GetTimeStr();
-            influenceMap.CopyTo(influenceMapPrev, 0);
-            useNativeMap = false;
-
-
-            RenderMapToTexture(influenceMap);
-            //RenderNativeMapToTexture(influenceMapNativePrev, influenceMapTexture);
+            InfluenceMapTest();
         }
 
         if (Input.GetKeyDown(KeyCode.Alpha2))
         {
-            GenerateRandomUnitData(true);
-            Debug.Log("Starting a new influence calc single threaded");
-            Timer timer = new Timer();
-            CalculateInfluenceMap();
-            timer.Stop();
-            timerText.text = "Influence map time: " + timer.GetTimeStr();
-            influenceMap.CopyTo(influenceMapPrev, 0);
-            useNativeMap = false;
-
-            timer.Restart();
-            RenderMapToTexture(influenceMap);
-            timer.Stop();
-            renderTimerText.text = "Render time: " + timer.GetTimeStr();
-            //RenderNativeMapToTexture(influenceMapNativePrev, influenceMapTexture);
+            InfluenceMapStructTest();
         }
 
         if (Input.GetKeyDown(KeyCode.Alpha3))
         {
-            GenerateRandomUnitDataNative(false);
-            Debug.Log("Starting a new influenceMapJob");
-            jobTimer.Restart();
-
-            influenceMapJob = new InfluenceMapJob();
-            influenceMapJob.influenceMap = influenceMapNative;
-            influenceMapJob.unitXCords = unitXCordsNative;
-            influenceMapJob.unitYCords = unitYCordsNative;
-            influenceMapJob.unitInfs = unitInfsNative;
-            influenceMapJobHandle = influenceMapJob.Schedule(ROWS * COLS, ROWS);
-
-            //JobHandle.ScheduleBatchedJobs();
-            influenceJobReady = false;
-            influenceMapJobHandle.Complete();
-
-            jobTimer.Stop();
-            timerText.text = "Influence map time: " + jobTimer.GetTimeStr();
-
-            useNativeMap = true;
-            influenceMapNative.CopyTo(influenceMapNativePrev);
-            influenceJobReady = true;
-
-            RenderNativeMapToTexture(influenceMapNativePrev);
+            InfluenceMapJobTest();
         }
 
         if(Input.GetKeyDown(KeyCode.Alpha4))
         {
-            GenerateRandomUnitsStructNative(true);
-            Debug.Log("Starting a new influenceMapJobUnitStruct");
-            jobTimer.Restart();
-
-            influenceMapJobUnitStruct = new InfluenceMapJobUnitStruct();
-            influenceMapJobUnitStruct.influenceMap = influenceMapNative;
-            influenceMapJobUnitStruct.units = unitsNative;
-            influenceMapJobUnitStructHandle = influenceMapJobUnitStruct.Schedule(ROWS * COLS, ROWS);
-
-            //JobHandle.ScheduleBatchedJobs();
-            influenceJobReady = false;
-            influenceMapJobUnitStructHandle.Complete();
-
-            jobTimer.Stop();
-            timerText.text = "Influence map time: " + jobTimer.GetTimeStr();
-
-            useNativeMap = true;
-            influenceMapNative.CopyTo(influenceMapNativePrev);
-            influenceJobReady = true;
-
-            RenderNativeMapToTexture(influenceMapNativePrev);
+            InfluenceMapJobVectorizedTest();
         }
 
-
-        if (!influenceJobReady)
+        if (Input.GetKeyDown(KeyCode.Alpha5))
         {
-            if(influenceMapJobHandle.IsCompleted)
-            {
-                //influenceMapJobHandle.Complete();
-                ////unitXCords.Dispose();
-                ////unitYCords.Dispose();
-                ////unitInfs.Dispose();
-                //jobTimer.PrintTime("Influence job time: ");
-                //timerText.text = "Time:" + jobTimer.GetTimeStr();
-                //Debug.Log("InfluenceMapJob completed!");
-                ////influenceMapNativePrev = influenceMapNative;
-                //influenceMapNative.CopyTo(influenceMapNativePrev);
-                //RenderNativeMapToTexture(influenceMapTexture);
-                //influenceJobReady = true;
-            }
-            
-            
-            //Debug.Log(influenceMapNative.Length);
-            //if (influenceMapNative.Length > 0)
-            //{
-            //    RenderNativeMapToTexture(influenceMapTexture);
-            //}
+            InfluenceMapJobStructTest();
+        }
 
-            //influenceMapNativePrev = influenceMapNative;
-            
-            
+        if (Input.GetKeyDown(KeyCode.Alpha6))
+        {
+            InfluenceMapJobSTTest();
         }
     }
 
     private void OnDestroy()
     {
-        unitMapNative.Dispose();
         influenceMapNative.Dispose();
         influenceMapNativePrev.Dispose();
 
@@ -769,33 +951,36 @@ public class InfluenceMap : MonoBehaviour
 
     void GenerateRandomUnitDataNative(bool deterministic = false)
     {
-        Debug.Log("Generating random units...");
+        Debug.Log("Generating random native unit data...");
 
-        if(deterministic)
+        // Satunnaislukugeneraattorille voidaan asettaa ennalta valittu siemenluku deterministisen kartan luomiseksi.
+        if (deterministic)
         {
             Random.InitState(deterministicSeed);
         }
-        
 
+        // Valitaan luotavien yksiköiden määrä satunnaisesti.
         int unitsGreen = Random.Range(minUnitsPerSide, maxUnitsPerSide);
         int unitsRed = Random.Range(minUnitsPerSide, maxUnitsPerSide);
         
         int totalUnits = unitsGreen + unitsRed;
 
-        NativeArray<int> xCords = new NativeArray<int>(totalUnits, Allocator.Persistent);
-        NativeArray<int> yCords = new NativeArray<int>(totalUnits, Allocator.Persistent);
-        NativeArray<float> infs = new NativeArray<float>(totalUnits, Allocator.Persistent);
-
-        influenceMapJobHandle.Complete();
-
+        // Vapautetaan aikaisemmin varatut taulukot muistivuotojen välttämiseksi.
         unitXCordsNative.Dispose();
         unitYCordsNative.Dispose();
         unitInfsNative.Dispose();
 
+        // Varataan uudet NativeArrayt yksiköiden määrän mukaan.
+        NativeArray<int> xCords = new NativeArray<int>(totalUnits, Allocator.Persistent);
+        NativeArray<int> yCords = new NativeArray<int>(totalUnits, Allocator.Persistent);
+        NativeArray<float> infs = new NativeArray<float>(totalUnits, Allocator.Persistent);
+
+        // Asetetaan vapautetut osoittimet osoittamaan uusiin taulukkoihin.
         unitXCordsNative = xCords;
         unitYCordsNative = yCords;
         unitInfsNative = infs;
 
+        // Luodaan yksiköt
 
         for (int i = 0; i < unitsGreen; i++)
         {
@@ -815,6 +1000,7 @@ public class InfluenceMap : MonoBehaviour
 
             xCords[i] = x;
             yCords[i] = y;
+            // Punaisille yksiköille annetaan negatiivinen vaikutusarvo.
             infs[i] = Random.Range(minInfluence, maxInfluence) * -1.0f;
         }
 
