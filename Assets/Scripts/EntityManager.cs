@@ -81,7 +81,7 @@ struct EntityMovementJob : IJobParallelForTransform
             }
         }
 
-        // Muunnetaan yksiulotteinen taulukon ineksi x- ja y-koordinaateiksi.
+        // Muunnetaan yksiulotteinen taulukon indeksi x- ja y-koordinaateiksi.
         float moveX = moveIndex / ROWS;
         float moveY = moveIndex % ROWS;
 
@@ -119,7 +119,7 @@ public class EntityManager : MonoBehaviour
     NativeArray<int> offsetArray;
     public NativeArray<float> influenceMap;
 
-
+    const int deterministicSeed = 118355416;
     [SerializeField] float entityMoveSpeed = 2.0f;
 
 
@@ -129,7 +129,10 @@ public class EntityManager : MonoBehaviour
     [SerializeField] TMP_Text mousePointRadiusText;
     [SerializeField] TMP_Text entityCountText;
     [SerializeField] TMP_Text movementUpdateTimeText;
+    [SerializeField] TMP_Text frameTimeText;
     [SerializeField] TMP_Text moveSpeedText;
+    [SerializeField] TMP_Text avgSimTimeText;
+
     [ReadOnly] int[] offsets = new int[] { 0, 1, 1, 1, 1, 0, 1, -1, 0, -1, -1, -1, -1, 0, -1, 1};
 
     int ROWS = 320;
@@ -138,6 +141,10 @@ public class EntityManager : MonoBehaviour
     bool entitiesChanged = true;
     Timer timer;
 
+    bool benchmark = false;
+    const int simulationCount = 1000;
+    double totalSimulationTime = 0.0;
+    List<double> simulationTimes;
     
 
     private void Awake()
@@ -168,9 +175,11 @@ public class EntityManager : MonoBehaviour
 
         mousePointRadiusText.text = "Mouse point radius: " + radius.ToString();
         moveSpeedText.text = "Move speed: " + entityMoveSpeed;
+
+        simulationTimes = new List<double>(simulationCount);
+
     }
 
-    // Update is called once per frame
     void Update()
     {
 
@@ -179,11 +188,39 @@ public class EntityManager : MonoBehaviour
             if (entityList.Count > 0)
             {
                 EntityMovementMT();
-                
+
+
+
                 //EntityMovement();
+
+                if (benchmark)
+                {
+                    double runTime = timer.GetTime();
+                    simulationTimes.Add(runTime);
+                    totalSimulationTime += runTime;
+
+                    if (simulationTimes.Count == simulationCount)
+                    {
+                        benchmark = false;
+                        double avgSimTime = totalSimulationTime / simulationCount;
+                        avgSimTimeText.text = "Average simulation time of " + simulationCount + " simulations: " + System.Math.Round(avgSimTime * 1000.0) * 0.001 + "ms";
+                    }
+                }
+
             }
         }
 
+
+        // Benchmark
+        if(Input.GetKeyDown(KeyCode.B))
+        {
+            simulationTimes.Clear();
+            totalSimulationTime = 0.0;
+            ClearEntities();
+            Random.InitState(deterministicSeed);
+            SpawnRandomEntities(10000);
+            benchmark = true;
+        }
 
         mouseScroll = Input.mouseScrollDelta.y;
         if (mouseScroll != 0.0f)
@@ -226,9 +263,10 @@ public class EntityManager : MonoBehaviour
         }
 
         entityCountText.text = "Entities: " + entityList.Count;
-
+        frameTimeText.text = "Frame time: " + (Time.deltaTime * 1000.0f).ToString() + "ms";
     }
 
+    // Single-threaded
     void EntityMovement()
     {
         timer.Restart();
@@ -316,6 +354,7 @@ public class EntityManager : MonoBehaviour
         movementUpdateTimeText.text = "Movement update time: " + timer.GetTimeStr();
     }
 
+    // Multithreaded
     public void EntityMovementMT()
     {
         timer.Restart();
@@ -365,7 +404,6 @@ public class EntityManager : MonoBehaviour
 
     private void LateUpdate()
     {
-        
         UpdateInfluenceMap();
     }
 
@@ -455,36 +493,48 @@ public class EntityManager : MonoBehaviour
 
     void ClearEntities()
     {
-        if (Input.GetKeyDown(KeyCode.Backspace))
+        for (int i = 0; i < entityList.Count; i++)
         {
-            for (int i = 0; i < entityList.Count; i++)
-            {
-                Destroy(entityList[i]);
-            }
+            Destroy(entityList[i]);
+        }
 
-            entitySidesList.Clear();
-            entityList.Clear();
-            entityTransformList.Clear();
+        entitySidesList.Clear();
+        entityList.Clear();
+        entityTransformList.Clear();
 
-            movementJobHandle.Complete();
+        movementJobHandle.Complete();
 
-            if (entitySidesArray.IsCreated)
-            {
-                entitySidesArray.Dispose();
-            }
-            
-            if(transformAccessArray.isCreated)
-            {
-                transformAccessArray.Dispose();
-            }
+        if (entitySidesArray.IsCreated)
+        {
+            entitySidesArray.Dispose();
+        }
+
+        if (transformAccessArray.isCreated)
+        {
+            transformAccessArray.Dispose();
         }
     }
 
     private void OnDestroy()
     {
-        transformAccessArray.Dispose();
-        entitySidesArray.Dispose();
-        influenceMap.Dispose();
-        offsetArray.Dispose();
+        if(transformAccessArray.isCreated)
+        {
+            transformAccessArray.Dispose();
+        }
+
+        if(entitySidesArray.IsCreated)
+        {
+            entitySidesArray.Dispose();
+        }
+        
+        if(influenceMap.IsCreated)
+        {
+            influenceMap.Dispose();
+        }
+        
+        if(offsetArray.IsCreated)
+        {
+            offsetArray.Dispose();
+        }
     }
 }

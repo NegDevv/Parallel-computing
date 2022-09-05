@@ -13,84 +13,13 @@ using static Unity.Mathematics.math;
 using Diagnostics = System.Diagnostics;
 using float4 = Unity.Mathematics.float4;
 
-
-public class Timer
-{
-    Diagnostics.Stopwatch stopwatch;
-    double elapsedMs = 0;
-    string timerName = "";
-
-    public Timer()
-    {
-        stopwatch = new Diagnostics.Stopwatch();
-        stopwatch.Start();
-    }
-
-    public double GetTime()
-    {
-        // Tick is 100ns
-        elapsedMs = stopwatch.ElapsedTicks / 10000.0f;
-        return elapsedMs;
-    }
-
-    public string GetTimeStr()
-    {
-        // Tick is 100ns
-        elapsedMs = stopwatch.ElapsedTicks / 10000.0f;
-        return elapsedMs + "ms";
-    }
-
-    public void Start()
-    {
-        // Tick is 100ns
-        stopwatch.Start();
-    }
-
-    public void Restart()
-    {
-        stopwatch.Restart();
-    }
-
-    public void Stop()
-    {
-        // Tick is 100ns
-        stopwatch.Stop();
-    }
-
-    public void Reset()
-    {
-        // Tick is 100ns
-        stopwatch.Reset();
-    }
-
-    public void PrintTime()
-    {
-        // Tick is 100ns
-        elapsedMs = stopwatch.ElapsedTicks / 10000.0f;
-        Debug.Log(elapsedMs + "ms");
-    }
-
-    public void PrintTime(string timerName)
-    {
-        // Tick is 100ns
-        elapsedMs = stopwatch.ElapsedTicks / 10000.0f;
-        Debug.Log(timerName + ": " + elapsedMs + "ms");
-    }
-
-}
-
-public struct Unit
-{
-    public int x;
-    public int y;
-    public float influence;
-}
-
 public class InfluenceMap : MonoBehaviour
 {
     public static InfluenceMap Instance;
 
     const int deterministicSeed = 118355416;
+
+    #region JOBS
 
     [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
     struct InfluenceMapJobUnitStruct : IJobParallelFor
@@ -144,6 +73,7 @@ public class InfluenceMap : MonoBehaviour
             return totalInf;
         }
 
+        // Requires allow unsafe code in player settings
         unsafe float CalcPointInfUnitStructAVX(int col, int row)
         {
             float totalInf = 0.0f;
@@ -182,8 +112,8 @@ public class InfluenceMap : MonoBehaviour
 
             totalInf += horizontal_sumf(resVector);
 
-            // Calculate the rest normally. For example(300 % 8) = 4 (~10% of the total) (Worst case COLS % 8 == 7 which makes this scalar loop almost 20% of the total = BAD)
-            for (int i = 0; i < rest; i++) // Try to get rid of this somehow(Find a general solution)
+            // Calculate the rest normally.
+            for (int i = 0; i < rest; i++)
             {
                 int x = units[i].x;
                 int y = units[i].y;
@@ -241,20 +171,18 @@ public class InfluenceMap : MonoBehaviour
         [ReadOnly] public NativeArray<int> unitYCords;
         [ReadOnly] public NativeArray<float> unitInfs;
 
-
         float CalculatePointInfluenceFloat4(int col, int row)
         {
             float totalInf = 0.0f;
             int unitCount = unitInfs.Length;
 
-            int end = unitCount - 4;
             int rest = unitCount % 4;
-
+            int end = unitCount - rest;
+            
             float4 resVector = new float4(0.0f); // Result accumulator
             float4 addVector = new float4(1.0f); // Distance dropoff factor(smaller is faster dropoff)
             float4 col0Vector = new float4(col);
             float4 row0Vector = new float4(row);
-
 
             for (int i = 0; i < end; i += 4)
             {
@@ -264,19 +192,19 @@ public class InfluenceMap : MonoBehaviour
 
                 float4 distVector = CalcDistFloat4(col0Vector, row0Vector, xVector, yVector);
 
-                distVector = distVector + addVector;
+                distVector += addVector;
 
                 float4 infVector = new float4(unitInfs[i + 0], unitInfs[i + 1], unitInfs[i + 2], unitInfs[i + 3]);
 
                 //resVector = resVector + (infVector / distVector);
-                resVector = resVector + (infVector * rcp(distVector));
+                resVector += (infVector * rcp(distVector));
             }
 
             // Add horizontal sum of resVector to totalInf
             totalInf += csum(resVector);
 
             // Calculate the rest normally. 
-            for (int i = 0; i < rest; i++)
+            for (int i = end; i < unitCount; i++)
             {
                 int x = unitXCords[i];
                 int y = unitYCords[i];
@@ -294,8 +222,8 @@ public class InfluenceMap : MonoBehaviour
             float totalInf = 0.0f;
             int unitCount = unitInfs.Length;
 
-            int end = unitCount - 8;
             int rest = unitCount % 8;
+            int end = unitCount - rest;
 
             v256 resVector = mm256_set1_ps(0); // Result accumulator
             v256 addVector = mm256_set1_ps(1.0f); // Distance dropoff factor(smaller is faster dropoff)
@@ -332,8 +260,8 @@ public class InfluenceMap : MonoBehaviour
 
             totalInf += horizontal_sumf(resVector);
 
-            // Calculate the rest normally. For example(300 % 8) = 4 (~10% of the total) (Worst case COLS % 8 == 7 which makes this scalar loop almost 20% of the total = BAD)
-            for (int i = 0; i < rest; i++) // Try to get rid of this somehow(Find a general solution)
+            // Calculate the rest normally.
+            for (int i = end; i < unitCount; i++)
             {
                 int x = unitXCords[i];
                 int y = unitYCords[i];
@@ -349,8 +277,8 @@ public class InfluenceMap : MonoBehaviour
             float totalInf = 0.0f;
             int unitCount = unitInfs.Length;
 
-            int end = unitCount - 8;
             int rest = unitCount % 8;
+            int end = unitCount - rest;
 
             v256 resVector = mm256_set1_ps(0); // Result accumulator
             v256 addVector = mm256_set1_ps(1.0f); // Distance dropoff factor(smaller is faster dropoff)
@@ -378,8 +306,8 @@ public class InfluenceMap : MonoBehaviour
 
             totalInf += horizontal_sumf(resVector);
 
-            // Calculate the rest normally. For example(300 % 8) = 4 (~10% of the total) (Worst case COLS % 8 == 7 which makes this scalar loop almost 20% of the total = BAD)
-            for (int i = 0; i < rest; i++) // Try to get rid of this somehow(Find a general solution)
+            // Calculate the rest normally.
+            for (int i = end; i < unitCount; i++)
             {
                 int x = unitXCords[i];
                 int y = unitYCords[i];
@@ -408,7 +336,6 @@ public class InfluenceMap : MonoBehaviour
 
         public void Execute(int index)
         {
-
             if (IsAvxSupported)
             {
                 int x = index / ROWS;
@@ -441,6 +368,18 @@ public class InfluenceMap : MonoBehaviour
         [ReadOnly] public NativeArray<int> unitYCords;
         [ReadOnly] public NativeArray<float> unitInfs;
 
+        // Kutsutaan yht‰ vaikutuskartan ruutua kohden.
+        public void Execute(int index)
+        {
+            // Muunnetaan yksiulotteinen taulukon indeksi x- ja y-koordinaateiksi.
+            int x = index / ROWS;
+            int y = index % ROWS;
+
+            // Lasketaan ruudun vaikutus ja tallennetaan se vaikutuskarttaan k‰sitelt‰v‰‰n indeksiin.
+            float influencePoint = CalculatePointInfluence(x, y);
+            influenceMap[index] = influencePoint;
+        }
+
         // Laskee ja palauttaa vaikutusarvon yhdelle kartan ruudulle.
         float CalculatePointInfluence(int col, int row)
         {
@@ -460,20 +399,7 @@ public class InfluenceMap : MonoBehaviour
             }
             return totalInfluence;
         }
-
-        // Kutsutaan yht‰ vaikutuskartan ruutua kohden.
-        public void Execute(int index)
-        {
-            // Muunnetaan yksiulotteinen taulukon indeksi x- ja y-koordinaateiksi.
-            int x = index / ROWS;
-            int y = index % ROWS;
-
-            // Lasketaan ruudun vaikutus ja tallennetaan se vaikutuskarttaan k‰sitelt‰v‰‰n indeksiin.
-            float influencePoint = CalculatePointInfluence(x, y);
-            influenceMap[index] = influencePoint;
-        }
     }
-
 
     [BurstCompile(FloatPrecision.Standard, FloatMode.Fast)]
     struct InfluenceMapJobST : IJob
@@ -520,6 +446,8 @@ public class InfluenceMap : MonoBehaviour
             }
         }
     }
+
+    #endregion
 
     [SerializeField] GameObject influenceMapObj;
     [SerializeField] Renderer renderer;
@@ -583,13 +511,19 @@ public class InfluenceMap : MonoBehaviour
     bool influenceJobReady = false;
 
     Timer influenceMapTimer;
+    const int timerAccuracy = 3; // In decimal points
 
     [SerializeField] TMP_Text timerText;
+    [SerializeField] TMP_Text testNameText;
+    [SerializeField] TMP_Text averageTimeText;
     [SerializeField] TMP_Text renderTimerText;
     [SerializeField] TMP_Text mapSizeText;
     [SerializeField] TMP_Text entityCountText;
 
     public bool useNativeMap = false;
+
+   [SerializeField] int testRuns = 20;
+
 
     private void Awake()
     {
@@ -635,165 +569,292 @@ public class InfluenceMap : MonoBehaviour
         offsets = new int[,] { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 1, -1 }, { 0, -1 }, { -1, -1 }, { -1, 0 }, { -1, 1 } };
     }
 
-    
-    public void InfluenceMapTest()
+
+    void Update()
     {
-        GenerateRandomUnitData(true);
 
-        Debug.Log("Starting a new influence calc single threaded");
+        unitCountText.text = "Unit count: " + unitCount.ToString();
 
-        influenceMapTimer.Restart();
-        CalculateInfluenceMap();
-        influenceMapTimer.Stop();
+        
 
-        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+        // Single-threaded
+        if (Input.GetKeyDown(KeyCode.Alpha1))
+        {
+            InfluenceMapTest(true, testRuns);
+        }
 
-        influenceMap.CopyTo(influenceMapPrev, 0);
-        useNativeMap = false;
+        // Single-threaded Job
+        if (Input.GetKeyDown(KeyCode.Alpha2))
+        {
+            InfluenceMapJobSTTest(true, testRuns);
+        }
 
-        influenceMapTimer.Restart();
-        RenderMapToTexture(influenceMap);
-        influenceMapTimer.Stop();
+        // Multithreaded Job
+        if (Input.GetKeyDown(KeyCode.Alpha3))
+        {
+            InfluenceMapJobTest(true, testRuns);
+        }
 
-        renderTimerText.text = "Render time: " + influenceMapTimer.GetTimeStr();
-        //RenderNativeMapToTexture(influenceMapNativePrev, influenceMapTexture);
+        // Multithreaded Job manually vectorized
+        if(Input.GetKeyDown(KeyCode.Alpha4))
+        {
+            InfluenceMapJobVectorizedTest(true, testRuns);
+        }
     }
 
-    public void InfluenceMapStructTest()
+    private void OnDestroy()
     {
-        GenerateRandomUnitsStruct();
+        influenceMapNative.Dispose();
+        influenceMapNativePrev.Dispose();
 
-        Debug.Log("Starting a new influence calc struct single threaded");
+        unitXCordsNative.Dispose();
+        unitYCordsNative.Dispose();
+        unitInfsNative.Dispose();
+    }
+
+
+    public struct Unit
+    {
+        public int x;
+        public int y;
+        public float influence;
+    }
+
+    public void InfluenceMapTest(bool deterministic = false, int runCount = 1)
+    {
+        GenerateRandomUnitData(deterministic);
+
+        double[] runTimes = new double[runCount];
+        double totalTime = 0.0;
+        testNameText.text = "InfluenceMapTest";
+
+        for (int i = 0; i < runCount; i++)
+        {
+            //Debug.Log("Starting a new influence calc single threaded");
+
+            influenceMapTimer.Restart();
+            CalculateInfluenceMap();
+            influenceMapTimer.Stop();
+            runTimes[i] = influenceMapTimer.GetTime();
+            totalTime += runTimes[i];
+
+            timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
+
+            influenceMap.CopyTo(influenceMapPrev, 0);
+            useNativeMap = false;
+
+            influenceMapTimer.Restart();
+            RenderMapToTexture(influenceMap);
+            influenceMapTimer.Stop();
+
+            renderTimerText.text = "Map Render time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
+        }
+
+        double avgTime = totalTime / (double)runCount;
+        averageTimeText.text = "Average time of " + runCount + " runs: " + System.Math.Round(avgTime * 1000.0) * 0.001 + "ms";
+    }
+
+    public void InfluenceMapStructTest(bool deterministic = false)
+    {
+        GenerateRandomUnitsStruct(deterministic);
+
+        //Debug.Log("Starting a new influence calc struct single threaded");
 
         Timer timer = new Timer();
         CalculateInfluenceMapStruct();
         timer.Stop();
 
-        timerText.text = "Influence map time: " + timer.GetTimeStr();
+        timerText.text = "Influence map time: " + timer.GetTimeStr(timerAccuracy);
 
         influenceMap.CopyTo(influenceMapPrev, 0);
         useNativeMap = false;
 
+        timer.Restart();
         RenderMapToTexture(influenceMap);
         //RenderNativeMapToTexture(influenceMapNativePrev, influenceMapTexture);
+        timer.Stop();
+
+        renderTimerText.text = "Map Render time: " + timer.GetTimeStr(timerAccuracy);
     }
 
-    public void InfluenceMapJobTest()
+    public void InfluenceMapJobTest(bool deterministic = false, int runCount = 1)
     {
         // Generoidaan satunnainen yksikkˆdata.
-        GenerateRandomUnitDataNative(false);
+        GenerateRandomUnitDataNative(deterministic);
 
-        Debug.Log("Starting a new influenceMapJob");
+        double[] runTimes = new double[runCount];
+        double totalTime = 0.0;
+        testNameText.text = "InfluenceMapJobTest";
 
-        influenceMapTimer.Restart();
 
-        // Jobin luonti.
-        influenceMapJob = new InfluenceMapJob
+        for (int i = 0; i < runCount; i++)
         {
-            influenceMap = influenceMapNative,
-            unitXCords = unitXCordsNative,
-            unitYCords = unitYCordsNative,
-            unitInfs = unitInfsNative
-        };
 
-        // Ajoitetaan Jobi suoritettavaksi.
-        influenceMapJobHandle = influenceMapJob.Schedule(ROWS * COLS, ROWS);
+           // Debug.Log("Starting a new influenceMapJob");
 
-        // Varmistetaan Jobin valmistuminen.
-        influenceMapJobHandle.Complete();
+            influenceMapTimer.Restart();
 
-        influenceMapTimer.Stop();
+            // Jobin luonti.
+            influenceMapJob = new InfluenceMapJob
+            {
+                influenceMap = influenceMapNative,
+                unitXCords = unitXCordsNative,
+                unitYCords = unitYCordsNative,
+                unitInfs = unitInfsNative
+            };
 
-        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+            // Ajoitetaan Jobi suoritettavaksi.
+            influenceMapJobHandle = influenceMapJob.Schedule(ROWS * COLS, ROWS);
 
-        // Merkit‰‰n mink‰ tyyppista dataa k‰ytet‰‰n, EntityManageria varten.
-        useNativeMap = true;
+            // Varmistetaan Jobin valmistuminen.
+            influenceMapJobHandle.Complete();
 
-        // Kopioidaan juuri laskettu kartta toiseen taulukkoon,
-        // jotta sit‰ voidaan k‰ytt‰‰ mahdollisessa tilanteessa,
-        // jossa uuden kartan laskeminen on kesken.
-        influenceMapNative.CopyTo(influenceMapNativePrev);
+            influenceMapTimer.Stop();
 
-        // Visualisoidaan kartta tekstuuriin.
-        RenderNativeMapToTexture(influenceMapNativePrev);
+            runTimes[i] = influenceMapTimer.GetTime();
+            totalTime += runTimes[i];
+
+            timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
+
+            // Merkit‰‰n mink‰ tyyppista dataa k‰ytet‰‰n, EntityManageria varten.
+            useNativeMap = true;
+
+            // Kopioidaan juuri laskettu kartta toiseen taulukkoon,
+            // jotta sit‰ voidaan k‰ytt‰‰ mahdollisessa tilanteessa,
+            // jossa uuden kartan laskeminen on kesken.
+            influenceMapNative.CopyTo(influenceMapNativePrev);
+
+            // Visualisoidaan kartta tekstuuriin.
+            influenceMapTimer.Restart();
+            RenderNativeMapToTexture(influenceMapNativePrev);
+            influenceMapTimer.Stop();
+
+            renderTimerText.text = "Map Render time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
+        }
+
+        double avgTime = totalTime / (double)runCount;
+        averageTimeText.text = "Average time of " + runCount + " runs: " + System.Math.Round(avgTime * 1000.0) * 0.001 + "ms";
     }
 
-    public void InfluenceMapJobSTTest()
+    public void InfluenceMapJobSTTest(bool deterministic = false, int runCount = 1)
     {
         // Generoidaan satunnainen yksikkˆdata.
-        GenerateRandomUnitDataNative(false);
+        GenerateRandomUnitDataNative(deterministic);
 
-        Debug.Log("Starting a new influenceMapJob");
-        influenceMapTimer.Restart();
+        double[] runTimes = new double[runCount];
+        double totalTime = 0.0;
+        testNameText.text = "InfluenceMapJobSTTest";
 
-        // Jobin luonti.
-        influenceMapJobST = new InfluenceMapJobST
+
+        for (int i = 0; i < runCount; i++)
         {
-            influenceMap = influenceMapNative,
-            unitXCords = unitXCordsNative,
-            unitYCords = unitYCordsNative,
-            unitInfs = unitInfsNative
-        };
 
-        // Ajoitetaan Jobi suoritettavaksi.
-        influenceMapJobSTHandle = influenceMapJobST.Schedule();
+            //Debug.Log("Starting a new influenceMapJob");
+            influenceMapTimer.Restart();
 
-        // Varmistetaan Jobin valmistuminen.
-        influenceMapJobSTHandle.Complete();
+            // Jobin luonti.
+            influenceMapJobST = new InfluenceMapJobST
+            {
+                influenceMap = influenceMapNative,
+                unitXCords = unitXCordsNative,
+                unitYCords = unitYCordsNative,
+                unitInfs = unitInfsNative
+            };
 
-        influenceMapTimer.Stop();
-        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+            // Ajoitetaan Jobi suoritettavaksi.
+            influenceMapJobSTHandle = influenceMapJobST.Schedule();
 
-        // Merkit‰‰n mink‰ tyyppista dataa k‰ytet‰‰n, EntityManageria varten.
-        useNativeMap = true;
+            // Varmistetaan Jobin valmistuminen.
+            influenceMapJobSTHandle.Complete();
 
-        // Kopioidaan juuri laskettu kartta toiseen taulukkoon,
-        // jotta sit‰ voidaan k‰ytt‰‰ mahdollisessa tilanteessa,
-        // jossa uuden kartan laskeminen on kesken.
-        influenceMapNative.CopyTo(influenceMapNativePrev);
+            influenceMapTimer.Stop();
 
-        // Visualisoidaan kartta tekstuuriin.
-        RenderNativeMapToTexture(influenceMapNativePrev);
+            runTimes[i] = influenceMapTimer.GetTime();
+            totalTime += runTimes[i];
+
+            timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
+
+            // Merkit‰‰n mink‰ tyyppista dataa k‰ytet‰‰n, EntityManageria varten.
+            useNativeMap = true;
+
+            // Kopioidaan juuri laskettu kartta toiseen taulukkoon,
+            // jotta sit‰ voidaan k‰ytt‰‰ mahdollisessa tilanteessa,
+            // jossa uuden kartan laskeminen on kesken.
+            influenceMapNative.CopyTo(influenceMapNativePrev);
+
+            // Visualisoidaan kartta tekstuuriin.
+            influenceMapTimer.Restart();
+            RenderNativeMapToTexture(influenceMapNativePrev);
+            influenceMapTimer.Stop();
+
+            renderTimerText.text = "Map Render time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
+        }
+
+        double avgTime = totalTime / (double)runCount;
+        averageTimeText.text = "Average time of " + runCount + " runs: " + System.Math.Round(avgTime * 1000.0) * 0.001 + "ms";
+
     }
-    public void InfluenceMapJobVectorizedTest()
+    public void InfluenceMapJobVectorizedTest(bool deterministic = false, int runCount = 1)
     {
         // Generoidaan satunnainen yksikkˆdata.
-        GenerateRandomUnitDataNative(false);
-        Debug.Log("Starting a new influenceMapJobVectorized");
+        GenerateRandomUnitDataNative(deterministic);
 
-        influenceMapTimer.Restart();
+        double[] runTimes = new double[runCount];
+        double totalTime = 0.0;
 
-        // Vektorisoidun Jobin luonti.
-        influenceMapJobVectorized = new InfluenceMapJobVectorized
+        testNameText.text = "InfluenceMapJobVectorizedTest";
+
+        for (int i = 0; i < runCount; i++)
         {
-            influenceMap = influenceMapNative,
-            unitXCords = unitXCordsNative,
-            unitYCords = unitYCordsNative,
-            unitInfs = unitInfsNative
-        };
 
-        // Ajoitetaan Jobi suoritettavaksi.
-        influenceMapJobVectorizedHandle = influenceMapJobVectorized.Schedule(ROWS * COLS, ROWS);
+            //Debug.Log("Starting a new influenceMapJobVectorized");
 
-        // Varmistetaan Jobin valmistuminen.
-        influenceMapJobVectorizedHandle.Complete();
+            influenceMapTimer.Restart();
 
-        influenceMapTimer.Stop();
-        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+            // Vektorisoidun Jobin luonti.
+            influenceMapJobVectorized = new InfluenceMapJobVectorized
+            {
+                influenceMap = influenceMapNative,
+                unitXCords = unitXCordsNative,
+                unitYCords = unitYCordsNative,
+                unitInfs = unitInfsNative
+            };
 
-        // Merkit‰‰n mink‰ tyyppista dataa k‰ytet‰‰n, EntityManageria varten.
-        useNativeMap = true;
-        influenceMapNative.CopyTo(influenceMapNativePrev);
+            // Ajoitetaan Jobi suoritettavaksi.
+            influenceMapJobVectorizedHandle = influenceMapJobVectorized.Schedule(ROWS * COLS, ROWS);
 
-        // Visualisoidaan kartta tekstuuriin.
-        RenderNativeMapToTexture(influenceMapNativePrev);
+            // Varmistetaan Jobin valmistuminen.
+            influenceMapJobVectorizedHandle.Complete();
+
+            influenceMapTimer.Stop();
+
+            runTimes[i] = influenceMapTimer.GetTime();
+            totalTime += runTimes[i];
+
+            timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
+
+            // Merkit‰‰n mink‰ tyyppista dataa k‰ytet‰‰n, EntityManageria varten.
+            useNativeMap = true;
+            influenceMapNative.CopyTo(influenceMapNativePrev);
+
+            // Visualisoidaan kartta tekstuuriin.
+            influenceMapTimer.Restart();
+            RenderNativeMapToTexture(influenceMapNativePrev);
+            influenceMapTimer.Stop();
+
+            renderTimerText.text = "Map Render time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
+        }
+
+        double avgTime = totalTime / (double)runCount;
+        averageTimeText.text = "Average time of " + runCount + " runs: " + System.Math.Round(avgTime * 1000.0) * 0.001 + "ms";
+
     }
 
-    public void InfluenceMapJobStructTest()
+    public void InfluenceMapJobStructTest(bool deterministic = false)
     {
         // Generoidaan satunnainen yksikkˆdata.
-        GenerateRandomUnitsStructNative(true);
-        Debug.Log("Starting a new influenceMapJobUnitStruct");
+        GenerateRandomUnitsStructNative(deterministic);
+        //Debug.Log("Starting a new influenceMapJobUnitStruct");
 
         influenceMapTimer.Restart();
 
@@ -811,7 +872,7 @@ public class InfluenceMap : MonoBehaviour
         influenceMapJobUnitStructHandle.Complete();
 
         influenceMapTimer.Stop();
-        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr();
+        timerText.text = "Influence map time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
 
         // Merkit‰‰n mink‰ tyyppista dataa k‰ytet‰‰n, EntityManageria varten.
         useNativeMap = true;
@@ -822,66 +883,13 @@ public class InfluenceMap : MonoBehaviour
         influenceMapNative.CopyTo(influenceMapNativePrev);
 
         // Visualisoidaan kartta tekstuuriin.
+        influenceMapTimer.Restart();
         RenderNativeMapToTexture(influenceMapNativePrev);
+        influenceMapTimer.Stop();
+
+        renderTimerText.text = "Map Render time: " + influenceMapTimer.GetTimeStr(timerAccuracy);
     }
 
-    // Update is called once per frame
-    void Update()
-    {
-
-        //if (!computeThreadJoined && computeReady)
-        //{
-        //    computeThread.Join();
-        //    computeThreadJoined = true;
-        //    jobTimer.PrintTime("Influence time: ");
-        //    timerText.text = "Time:" + jobTimer.GetTimeStr();
-        //    RenderMapToTexture(influenceMapTexture);
-        //    Debug.Log("Compute thread joined!");
-        //}
-
-        unitCountText.text = "Unit count: " + unitCount.ToString();
-
-
-        if (Input.GetKeyDown(KeyCode.Alpha1))
-        {
-            InfluenceMapTest();
-        }
-
-        if (Input.GetKeyDown(KeyCode.Alpha2))
-        {
-            InfluenceMapStructTest();
-        }
-
-        if (Input.GetKeyDown(KeyCode.Alpha3))
-        {
-            InfluenceMapJobTest();
-        }
-
-        if(Input.GetKeyDown(KeyCode.Alpha4))
-        {
-            InfluenceMapJobVectorizedTest();
-        }
-
-        if (Input.GetKeyDown(KeyCode.Alpha5))
-        {
-            InfluenceMapJobStructTest();
-        }
-
-        if (Input.GetKeyDown(KeyCode.Alpha6))
-        {
-            InfluenceMapJobSTTest();
-        }
-    }
-
-    private void OnDestroy()
-    {
-        influenceMapNative.Dispose();
-        influenceMapNativePrev.Dispose();
-
-        unitXCordsNative.Dispose();
-        unitYCordsNative.Dispose();
-        unitInfsNative.Dispose();
-    }
 
     public int GetMapRows()
     {
@@ -1382,6 +1390,77 @@ public class InfluenceMap : MonoBehaviour
         //renderTimer.PrintTime("RenderTimer");
         //Debug.Log("Rendered map to texture");
     }
+
+}
+
+public class Timer
+{
+    Diagnostics.Stopwatch stopwatch;
+    double elapsedMs = 0;
+    string timerName = "";
+
+    public Timer()
+    {
+        stopwatch = new Diagnostics.Stopwatch();
+        stopwatch.Start();
+    }
+
+    public double GetTime()
+    {
+        // Tick is 100ns
+        elapsedMs = stopwatch.ElapsedTicks / 10000.0;
+        return elapsedMs;
+    }
+
+    public string GetTimeStr()
+    {
+        // Tick is 100ns
+        elapsedMs = stopwatch.ElapsedTicks / 10000.0;
+        return elapsedMs + "ms";
+    }
+
+    public string GetTimeStr(int accuracy)
+    {
+        // Tick is 100ns
+        elapsedMs = System.Math.Round((stopwatch.ElapsedTicks / 10000.0) * System.Math.Pow(10.0, accuracy)) * System.Math.Pow(10.0, -accuracy);
+        return elapsedMs + "ms";
+    }
+
+
+    public void Start()
+    {
+        stopwatch.Start();
+    }
+
+    public void Restart()
+    {
+        stopwatch.Restart();
+    }
+
+    public void Stop()
+    {
+        stopwatch.Stop();
+    }
+
+    public void Reset()
+    {
+        stopwatch.Reset();
+    }
+
+    public void PrintTime()
+    {
+        // Tick is 100ns
+        elapsedMs = stopwatch.ElapsedTicks / 10000.0;
+        Debug.Log(elapsedMs + "ms");
+    }
+
+    public void PrintTime(string timerName)
+    {
+        // Tick is 100ns
+        elapsedMs = stopwatch.ElapsedTicks / 10000.0;
+        Debug.Log(timerName + ": " + elapsedMs + "ms");
+    }
+
 }
 
 
