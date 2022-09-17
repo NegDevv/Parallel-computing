@@ -453,10 +453,21 @@ public class EntityManager : MonoBehaviour
                 {
                     if (x * x + y * y <= radius * radius)
                     {
-                        GameObject newEntity = SpawnEntity();
-                        Vector3 entityPos = new Vector3(hit.point.x + x, hit.point.y, hit.point.z + y);
-                        newEntity.transform.position = entityPos;
-                        newEntity.transform.localScale = new Vector3(0.1f, 0.1f, 0.1f);
+                        int xPos = Mathf.RoundToInt(hit.point.x) + x;
+                        int yPos = Mathf.RoundToInt(hit.point.z) + y;
+
+                        if (xPos < 0 || xPos >= COLS
+                        || yPos < 0 || yPos >= ROWS)
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            GameObject newEntity = SpawnEntity();
+                            Vector3 entityPos = new Vector3(hit.point.x + x, hit.point.y, hit.point.z + y);
+                            newEntity.transform.position = entityPos;
+                            newEntity.transform.localScale = new Vector3(0.1f, 0.1f, 0.1f);
+                        }
                     }
                 }
             }

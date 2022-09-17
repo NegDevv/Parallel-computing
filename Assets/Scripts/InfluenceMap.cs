@@ -567,6 +567,8 @@ public class InfluenceMap : MonoBehaviour
         influenceMapTimer = new Timer();
 
         offsets = new int[,] { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 1, -1 }, { 0, -1 }, { -1, -1 }, { -1, 0 }, { -1, 1 } };
+
+        InfluenceMapTest(true, 1);
     }
 
 
@@ -599,6 +601,12 @@ public class InfluenceMap : MonoBehaviour
         if(Input.GetKeyDown(KeyCode.Alpha4))
         {
             InfluenceMapJobVectorizedTest(true, testRuns);
+        }
+
+        // Multithreaded Job
+        if (Input.GetKeyDown(KeyCode.Space))
+        {
+            InfluenceMapJobTest(false, 1);
         }
     }
 
